@@ -1,0 +1,28 @@
+services:
+  prom_tigo:
+    image: blindbadgerstudios/prom_tigo:latest
+    container_name: prom_tigo
+    restart: unless-stopped
+    ports:
+      - "10111:10111"
+    environment:
+      TIGO_USERNAME: "${TIGO_USERNAME}"
+      TIGO_PASSWORD: "${TIGO_PASSWORD}"
+      TIGO_SYSTEM_ID: "${TIGO_SYSTEM_ID:-}"
+      POLL_INTERVAL_SECONDS: "60"
+      LISTEN_PORT: "10111"
+      LOG_LEVEL: "INFO"
+      TIGO_TIMEOUT_SECONDS: "30"
+      TOPOLOGY_REFRESH_INTERVAL_POLLS: "10"
+      PANEL_TELEMETRY_WINDOW_MINUTES: "15"
+      PANEL_TELEMETRY_PARAMS: "Pin,Vin,Iin,RSSI,Temp,Tmod,Tcell,Tamb"
+      SOURCE_STALE_AFTER_SECONDS: "900"
+      PANEL_STALE_AFTER_SECONDS: "900"
+      ALERT_FETCH_LIMIT: "200"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
