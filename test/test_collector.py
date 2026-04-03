@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from pytigo import TigoPage
+
 from app.collector import TigoCollector
 from app.config import AppConfig
 from app.metrics import build_metrics
@@ -24,7 +26,7 @@ class FakeClient:
         return None
 
     def list_systems(self):
-        return [type('System', (), {'system_id': 123, 'name': 'Array One'})()]
+        return TigoPage(items=[type('System', (), {'system_id': 123, 'name': 'Array One'})()])
 
     def get_system(self, system_id):
         return type('System', (), {
@@ -34,6 +36,8 @@ class FakeClient:
             'status': 'active',
             'recent_alerts_count': 2,
             'has_monitored_modules': True,
+            'power_rating': 8500.0,
+            'power_rating_ac': 7600.0,
         })()
 
     def get_summary(self, system_id):
@@ -66,7 +70,7 @@ class FakeClient:
         })()]
 
     def get_alerts(self, system_id, limit=200):
-        return [object(), object()]
+        return TigoPage(items=[], total=2)
 
     def get_layout(self, system_id):
         panel1 = type('Panel', (), {'panel_id': 1, 'label': 'A1', 'serial': 'OPT-A1', 'panel_type': 'TS4', 'source_id': 200, 'object_id': 1001})()
@@ -77,9 +81,10 @@ class FakeClient:
         return type('Layout', (), {'inverters': [inverter]})()
 
     def get_objects(self, system_id):
+        ui = type('UI', (), {'max_power': 375.0})()
         return [
-            type('Obj', (), {'object_id': 1001, 'datasource': 'SOURCE.panels.A1'})(),
-            type('Obj', (), {'object_id': 1002, 'datasource': 'SOURCE.panels.A2'})(),
+            type('Obj', (), {'object_id': 1001, 'datasource': 'SOURCE.panels.A1', 'ui': ui})(),
+            type('Obj', (), {'object_id': 1002, 'datasource': 'SOURCE.panels.A2', 'ui': ui})(),
         ]
 
     def get_aggregate(self, system_id, *, start, end, level, param, object_ids, header):
@@ -155,3 +160,42 @@ def test_collect_once_populates_metrics():
             'datasource': 'SOURCE.panels.A1',
         },
     ) == 45.0
+
+    # System capacity ratings
+    assert metrics.registry.get_sample_value(
+        'tigo_system_power_rating_dc_watts',
+        labels={'system_id': '123', 'system_name': 'Array One'},
+    ) == 8500.0
+    assert metrics.registry.get_sample_value(
+        'tigo_system_power_rating_ac_watts',
+        labels={'system_id': '123', 'system_name': 'Array One'},
+    ) == 7600.0
+
+    # Per-panel rated max power from topology
+    panel_labels = {
+        'system_id': '123',
+        'panel_id': '1',
+        'panel_label': 'A1',
+        'panel_serial': 'OPT-A1',
+        'panel_type': 'TS4',
+        'inverter_id': '500',
+        'inverter_label': 'INV-1',
+        'mppt_id': '400',
+        'mppt_label': 'MPPT 1',
+        'string_id': '300',
+        'string_label': 'String A',
+        'source_id': '200',
+        'object_id': '1001',
+        'datasource': 'SOURCE.panels.A1',
+    }
+    assert metrics.registry.get_sample_value('tigo_panel_power_rating_watts', labels=panel_labels) == 375.0
+
+    # Inverter and string power rollups
+    assert metrics.registry.get_sample_value(
+        'tigo_inverter_power_watts',
+        labels={'system_id': '123', 'inverter_id': '500', 'inverter_label': 'INV-1'},
+    ) == 320.5 + 315.2
+    assert metrics.registry.get_sample_value(
+        'tigo_string_power_watts',
+        labels={'system_id': '123', 'inverter_id': '500', 'inverter_label': 'INV-1', 'string_id': '300', 'string_label': 'String A'},
+    ) == 320.5 + 315.2

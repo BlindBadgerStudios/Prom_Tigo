@@ -37,6 +37,11 @@ class Metrics:
     panel_signal_strength: Gauge
     panel_temperature_celsius: Gauge
     panel_metric_value: Gauge
+    panel_power_rating_watts: Gauge
+    inverter_power_watts: Gauge
+    string_power_watts: Gauge
+    system_power_rating_dc_watts: Gauge
+    system_power_rating_ac_watts: Gauge
 
 
 def build_metrics(registry: CollectorRegistry | None = None) -> Metrics:
@@ -93,6 +98,11 @@ def build_metrics(registry: CollectorRegistry | None = None) -> Metrics:
         panel_signal_strength=Gauge("tigo_panel_signal_strength", "Latest panel signal telemetry", panel_labels, registry=registry),
         panel_temperature_celsius=Gauge("tigo_panel_temperature_celsius", "Latest panel temperature telemetry when available", panel_labels, registry=registry),
         panel_metric_value=Gauge("tigo_panel_metric_value", "Latest generic panel telemetry value for raw/unknown params", panel_labels + ["param"], registry=registry),
+        panel_power_rating_watts=Gauge("tigo_panel_power_rating_watts", "Rated max power for the panel from system topology (watts)", panel_labels, registry=registry),
+        inverter_power_watts=Gauge("tigo_inverter_power_watts", "Total DC power across all panels on this inverter (watts)", ["system_id", "inverter_id", "inverter_label"], registry=registry),
+        string_power_watts=Gauge("tigo_string_power_watts", "Total DC power across all panels on this string (watts)", ["system_id", "inverter_id", "inverter_label", "string_id", "string_label"], registry=registry),
+        system_power_rating_dc_watts=Gauge("tigo_system_power_rating_dc_watts", "Rated DC capacity of the system (watts)", ["system_id", "system_name"], registry=registry),
+        system_power_rating_ac_watts=Gauge("tigo_system_power_rating_ac_watts", "Rated AC capacity of the system (watts)", ["system_id", "system_name"], registry=registry),
     )
 
 
@@ -124,5 +134,10 @@ def clear_labeled_metrics(metrics: Metrics) -> None:
         metrics.panel_signal_strength,
         metrics.panel_temperature_celsius,
         metrics.panel_metric_value,
+        metrics.panel_power_rating_watts,
+        metrics.inverter_power_watts,
+        metrics.string_power_watts,
+        metrics.system_power_rating_dc_watts,
+        metrics.system_power_rating_ac_watts,
     ):
         gauge.clear()

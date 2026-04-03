@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
+
+from pytigo import TigoPage
 
 from .config import AppConfig
 from .metrics import Metrics, clear_labeled_metrics
@@ -33,6 +35,7 @@ class PanelRecord:
     source_id: int | None
     object_id: int | None
     datasource: str
+    max_power: float | None = None
 
     def labels(self) -> dict[str, str]:
         return {
@@ -78,6 +81,7 @@ class TigoCollector:
         self._system_id = config.system_id
         self._topology_poll_counter = 0
         self._panels_by_object_id: dict[int, PanelRecord] = {}
+        self._latest_power_by_object_id: dict[int, float] = {}
 
     def login(self) -> None:
         self.client.login()
@@ -85,10 +89,10 @@ class TigoCollector:
     def resolve_system_id(self) -> int:
         if self._system_id is not None:
             return self._system_id
-        systems = self.client.list_systems()
-        if not systems:
+        page = self.client.list_systems()
+        if not page.items:
             raise RuntimeError("No Tigo systems available to the configured account")
-        self._system_id = int(systems[0].system_id)
+        self._system_id = int(page.items[0].system_id)
         return self._system_id
 
     def collect_once(self) -> None:
@@ -105,13 +109,14 @@ class TigoCollector:
         self._record_panel_topology()
         self._record_panel_status_defaults(system_id)
         self._record_panel_telemetry(system_id)
+        self._record_inverter_and_string_rollups()
 
-    def _safe_get_alerts(self, system_id: int) -> list[Any]:
+    def _safe_get_alerts(self, system_id: int) -> TigoPage:
         try:
             return self.client.get_alerts(system_id, limit=self.config.alert_fetch_limit)
         except Exception:
-            logger.debug("Could not fetch alerts for system %s", system_id, exc_info=True)
-            return []
+            logger.warning("Could not fetch alerts for system %s", system_id, exc_info=True)
+            return TigoPage(items=[])
 
     def _maybe_refresh_topology(self, system_id: int) -> None:
         self._topology_poll_counter += 1
@@ -129,6 +134,8 @@ class TigoCollector:
                             continue
                         obj = objects_by_id.get(int(panel.object_id))
                         datasource = obj.datasource if obj and obj.datasource else ""
+                        obj_ui = getattr(obj, 'ui', None) if obj else None
+                        max_power = obj_ui.max_power if obj_ui else None
                         panel_records[int(panel.object_id)] = PanelRecord(
                             system_id=system_id,
                             panel_id=int(panel.panel_id),
@@ -144,10 +151,11 @@ class TigoCollector:
                             source_id=panel.source_id,
                             object_id=panel.object_id,
                             datasource=datasource,
+                            max_power=max_power,
                         )
         self._panels_by_object_id = panel_records
 
-    def _record_system_metrics(self, system: Any, summary: Any, alerts: list[Any]) -> None:
+    def _record_system_metrics(self, system: Any, summary: Any, alerts: TigoPage) -> None:
         system_id = str(system.system_id)
         system_name = system.name or f"system_{system.system_id}"
         status = system.status or ""
@@ -157,9 +165,10 @@ class TigoCollector:
             timezone=system.timezone or "",
             status=status,
         ).set(1)
-        self.metrics.system_recent_alerts_count.labels(system_id=system_id, system_name=system_name).set(
-            float(getattr(system, 'recent_alerts_count', 0) or len(alerts))
-        )
+        alert_count = getattr(system, 'recent_alerts_count', None)
+        if alert_count is None:
+            alert_count = alerts.total if alerts.total is not None else len(alerts.items)
+        self.metrics.system_recent_alerts_count.labels(system_id=system_id, system_name=system_name).set(float(alert_count))
         self.metrics.system_has_monitored_modules.labels(system_id=system_id, system_name=system_name).set(
             1 if getattr(system, 'has_monitored_modules', False) else 0
         )
@@ -168,6 +177,8 @@ class TigoCollector:
             (self.metrics.system_daily_energy_dc_watt_hours, getattr(summary, 'daily_energy_dc', None)),
             (self.metrics.system_ytd_energy_dc_watt_hours, getattr(summary, 'ytd_energy_dc', None)),
             (self.metrics.system_lifetime_energy_dc_watt_hours, getattr(summary, 'lifetime_energy_dc', None)),
+            (self.metrics.system_power_rating_dc_watts, getattr(system, 'power_rating', None)),
+            (self.metrics.system_power_rating_ac_watts, getattr(system, 'power_rating_ac', None)),
         ):
             numeric = _coerce_float(value)
             if numeric is not None:
@@ -216,6 +227,8 @@ class TigoCollector:
     def _record_panel_topology(self) -> None:
         for panel in self._panels_by_object_id.values():
             self.metrics.panel_info.labels(**panel.labels()).set(1)
+            if panel.max_power is not None:
+                self.metrics.panel_power_rating_watts.labels(**panel.labels()).set(panel.max_power)
 
     def _record_panel_status_defaults(self, system_id: int) -> None:
         for panel in self._panels_by_object_id.values():
@@ -231,6 +244,7 @@ class TigoCollector:
         object_ids = sorted(self._panels_by_object_id.keys())
         if not object_ids:
             return
+        self._latest_power_by_object_id.clear()
         end = datetime.now(tz=UTC)
         start = end - timedelta(minutes=max(self.config.panel_telemetry_window_minutes, 1))
         start_str = start.strftime('%Y-%m-%dT%H:%M:%S')
@@ -263,7 +277,7 @@ class TigoCollector:
                 if value is None:
                     continue
                 self.metrics.panel_metric_value.labels(**labels, param=param).set(value)
-                self._record_param_specific_metric(param, labels, value)
+                self._record_param_specific_metric(param, labels, value, object_id)
         now_ts = datetime.now(tz=UTC).timestamp()
         for object_id, panel in self._panels_by_object_id.items():
             sample_ts = latest_seen.get(object_id)
@@ -298,9 +312,10 @@ class TigoCollector:
                 break
         return latest
 
-    def _record_param_specific_metric(self, param: str, labels: dict[str, str], value: float) -> None:
+    def _record_param_specific_metric(self, param: str, labels: dict[str, str], value: float, object_id: int) -> None:
         if param in POWER_PARAMS:
             self.metrics.panel_power_watts.labels(**labels).set(value)
+            self._latest_power_by_object_id[object_id] = value
         elif param in VOLTAGE_PARAMS:
             self.metrics.panel_voltage_volts.labels(**labels).set(value)
         elif param in CURRENT_PARAMS:
@@ -309,3 +324,29 @@ class TigoCollector:
             self.metrics.panel_signal_strength.labels(**labels).set(value)
         elif param in TEMPERATURE_PARAMS:
             self.metrics.panel_temperature_celsius.labels(**labels).set(value)
+
+    def _record_inverter_and_string_rollups(self) -> None:
+        inverter_power: dict[tuple[str, str, str], float] = {}
+        string_power: dict[tuple[str, str, str, str, str], float] = {}
+        for object_id, panel in self._panels_by_object_id.items():
+            power = self._latest_power_by_object_id.get(object_id)
+            if power is None:
+                continue
+            inv_key = (str(panel.system_id), str(panel.inverter_id or ""), panel.inverter_label)
+            str_key = (str(panel.system_id), str(panel.inverter_id or ""), panel.inverter_label, str(panel.string_id or ""), panel.string_label)
+            inverter_power[inv_key] = inverter_power.get(inv_key, 0.0) + power
+            string_power[str_key] = string_power.get(str_key, 0.0) + power
+        for (system_id, inverter_id, inverter_label), total in inverter_power.items():
+            self.metrics.inverter_power_watts.labels(
+                system_id=system_id,
+                inverter_id=inverter_id,
+                inverter_label=inverter_label,
+            ).set(total)
+        for (system_id, inverter_id, inverter_label, string_id, string_label), total in string_power.items():
+            self.metrics.string_power_watts.labels(
+                system_id=system_id,
+                inverter_id=inverter_id,
+                inverter_label=inverter_label,
+                string_id=string_id,
+                string_label=string_label,
+            ).set(total)
