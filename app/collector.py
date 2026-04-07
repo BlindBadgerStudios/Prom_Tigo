@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
+
+import requests
 
 from pytigo import TigoPage
 
@@ -252,14 +255,14 @@ class TigoCollector:
         latest_seen: dict[int, float] = {}
         for param in self.config.panel_telemetry_params:
             try:
-                table = self.client.get_aggregate(
+                table = self._get_aggregate_with_retry(
                     system_id,
                     start=start_str,
                     end=end_str,
-                    level='min',
                     param=param,
                     object_ids=object_ids,
-                    header='id',
+                    max_retries=self.config.rate_limit_max_retries,
+                    base_delay=self.config.rate_limit_base_delay_seconds,
                 )
             except Exception:
                 logger.debug("Telemetry param %s unavailable for system %s", param, system_id, exc_info=True)
@@ -294,6 +297,37 @@ class TigoCollector:
                 panel_id=str(panel.panel_id),
                 panel_label=panel.panel_label,
             ).set(is_up)
+
+    def _get_aggregate_with_retry(
+        self,
+        system_id: int,
+        *,
+        start: str,
+        end: str,
+        param: str,
+        object_ids: list[int],
+        max_retries: int = 3,
+        base_delay: float = 5.0,
+    ):
+        for attempt in range(max_retries):
+            try:
+                return self.client.get_aggregate(
+                    system_id,
+                    start=start,
+                    end=end,
+                    level='min',
+                    param=param,
+                    object_ids=object_ids,
+                    header='id',
+                )
+            except requests.exceptions.HTTPError as exc:
+                if exc.response is not None and exc.response.status_code == 429 and attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    logger.debug("Rate limited on param %s, retrying in %.1fs (attempt %d/%d)", param, delay, attempt + 1, max_retries)
+                    time.sleep(delay)
+                else:
+                    raise
+        raise RuntimeError("unreachable")
 
     def _latest_values(self, rows: list[Any], object_ids: list[int]) -> dict[int, dict[str, Any]]:
         wanted = {str(object_id): object_id for object_id in object_ids}
