@@ -5,10 +5,10 @@ import threading
 import time
 
 from prometheus_client import start_http_server
-from pytigo import TigoClient
+from pytigo import TigoCCAClient, TigoClient, TigoClientProtocol
 
 from .collector import TigoCollector
-from .config import load_config
+from .config import AppConfig, load_config
 from .metrics import build_metrics
 
 
@@ -29,6 +29,22 @@ def _run_loop(collector: TigoCollector, poll_interval_seconds: int, metrics) -> 
         time.sleep(poll_interval_seconds)
 
 
+def _build_client(config: AppConfig) -> TigoClientProtocol:
+    if config.mode == "local":
+        return TigoCCAClient(
+            host=config.local_host,
+            username=config.local_username,
+            password=config.local_password,
+            timeout=config.timeout_seconds,
+            tz_offset_seconds=config.local_tz_offset_seconds,
+        )
+    return TigoClient(
+        username=config.username,
+        password=config.password,
+        timeout=config.timeout_seconds,
+    )
+
+
 def main() -> None:
     config = load_config()
     logging.basicConfig(
@@ -36,14 +52,10 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(message)s",
     )
     metrics = build_metrics()
-    client = TigoClient(
-        username=config.username,
-        password=config.password,
-        timeout=config.timeout_seconds,
-    )
+    client = _build_client(config)
     collector = TigoCollector(client=client, config=config, metrics=metrics)
     collector.login()
-    logging.info("Logged in to Tigo. Starting exporter on port %d", config.listen_port)
+    logging.info("Logged in to Tigo (%s mode). Starting exporter on port %d", config.mode, config.listen_port)
     start_http_server(config.listen_port, registry=metrics.registry)
     thread = threading.Thread(
         target=_run_loop,

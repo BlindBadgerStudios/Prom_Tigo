@@ -23,8 +23,8 @@ def _env_csv(name: str, default: list[str]) -> list[str]:
 
 @dataclass(slots=True)
 class AppConfig:
-    username: str
-    password: str
+    # --- shared ---
+    mode: str = "cloud"          # "cloud" or "local"
     system_id: int | None = None
     poll_interval_seconds: int = 60
     listen_port: int = 10111
@@ -36,14 +36,39 @@ class AppConfig:
     source_stale_after_seconds: int = 900
     panel_stale_after_seconds: int = 900
     alert_fetch_limit: int = 200
+    # --- cloud mode ---
+    username: str = ""
+    password: str = ""
+    # --- local mode ---
+    local_host: str = ""
+    local_username: str = "Tigo"
+    local_password: str = "$olar"
+    local_tz_offset_seconds: int = 0
 
 
 def load_config() -> AppConfig:
-    username = os.getenv("TIGO_USERNAME")
-    password = os.getenv("TIGO_PASSWORD")
-    if not username or not password:
-        raise RuntimeError("TIGO_USERNAME and TIGO_PASSWORD must be set")
+    mode = os.getenv("TIGO_MODE", "cloud").lower()
+    if mode not in ("cloud", "local"):
+        raise RuntimeError(f"TIGO_MODE must be 'cloud' or 'local', got {mode!r}")
+
+    if mode == "cloud":
+        username = os.getenv("TIGO_USERNAME")
+        password = os.getenv("TIGO_PASSWORD")
+        if not username or not password:
+            raise RuntimeError("TIGO_USERNAME and TIGO_PASSWORD must be set in cloud mode")
+    else:
+        username = os.getenv("TIGO_USERNAME", "")
+        password = os.getenv("TIGO_PASSWORD", "")
+
+    if mode == "local":
+        local_host = os.getenv("TIGO_LOCAL_HOST")
+        if not local_host:
+            raise RuntimeError("TIGO_LOCAL_HOST must be set in local mode")
+    else:
+        local_host = os.getenv("TIGO_LOCAL_HOST", "")
+
     return AppConfig(
+        mode=mode,
         username=username,
         password=password,
         system_id=_env_optional_int("TIGO_SYSTEM_ID"),
@@ -60,4 +85,8 @@ def load_config() -> AppConfig:
         source_stale_after_seconds=_env_int("SOURCE_STALE_AFTER_SECONDS", 900),
         panel_stale_after_seconds=_env_int("PANEL_STALE_AFTER_SECONDS", 900),
         alert_fetch_limit=_env_int("ALERT_FETCH_LIMIT", 200),
+        local_host=local_host,
+        local_username=os.getenv("TIGO_LOCAL_USERNAME", "Tigo"),
+        local_password=os.getenv("TIGO_LOCAL_PASSWORD", "$olar"),
+        local_tz_offset_seconds=_env_int("TIGO_LOCAL_TZ_OFFSET_SECONDS", 0),
     )
