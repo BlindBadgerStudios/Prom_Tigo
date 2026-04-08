@@ -117,7 +117,7 @@ class TigoCollector:
         self._record_source_metrics(system_id, sources)
         self._record_panel_topology()
         self._record_panel_status_defaults(system_id)
-        self._record_panel_telemetry(system_id)
+        self._record_panel_telemetry(system_id, summary)
         self._record_inverter_and_string_rollups()
 
     def _safe_get_alerts(self, system_id: int) -> TigoPage:
@@ -247,15 +247,15 @@ class TigoCollector:
                 panel_label=panel.panel_label,
             ).set(0)
 
-    def _record_panel_telemetry(self, system_id: int) -> None:
+    def _record_panel_telemetry(self, system_id: int, summary: Any) -> None:
         if not self._panels_by_object_id:
             return
         object_ids = sorted(self._panels_by_object_id.keys())
         if not object_ids:
             return
         self._latest_power_by_object_id.clear()
-        end = datetime.now(tz=UTC)
-        start = end - timedelta(minutes=max(self.config.panel_telemetry_window_minutes, 1))
+
+        start, end = self._resolve_panel_window(system_id, object_ids, summary)
         start_str = start.strftime('%Y-%m-%dT%H:%M:%S')
         end_str = end.strftime('%Y-%m-%dT%H:%M:%S')
         latest_seen: dict[int, float] = {}
@@ -341,6 +341,41 @@ class TigoCollector:
                 else:
                     raise
         raise RuntimeError("unreachable")
+
+    def _resolve_panel_window(self, system_id: int, object_ids: list[int], summary: Any) -> tuple[datetime, datetime]:
+        window_minutes = max(self.config.panel_telemetry_window_minutes, 1)
+        end = datetime.now(tz=UTC)
+        start = end - timedelta(minutes=window_minutes)
+
+        # Cloud mode uses the recent window only. Local mode can have valid current-ish
+        # telemetry in the latest populated sample even when the most recent wall-clock
+        # window is empty, so fall back to the summary timestamp when needed.
+        if getattr(self.config, 'mode', 'cloud') != 'local':
+            return start, end
+
+        try:
+            pin_recent = self._get_aggregate_with_retry(
+                system_id,
+                start=start.strftime('%Y-%m-%dT%H:%M:%S'),
+                end=end.strftime('%Y-%m-%dT%H:%M:%S'),
+                param='Pin',
+                object_ids=object_ids,
+                max_retries=self.config.rate_limit_max_retries,
+                base_delay=self.config.rate_limit_base_delay_seconds,
+            )
+            if self._latest_values(pin_recent.rows, object_ids):
+                return start, end
+        except Exception:
+            logger.debug('Recent Pin window lookup failed for system %s', system_id, exc_info=True)
+
+        summary_updated = getattr(summary, 'updated_on', None)
+        if summary_updated is None:
+            return start, end
+        if summary_updated.tzinfo is None:
+            summary_updated = summary_updated.replace(tzinfo=UTC)
+        fallback_end = summary_updated
+        fallback_start = fallback_end - timedelta(minutes=window_minutes)
+        return fallback_start, fallback_end
 
     def _latest_values(self, rows: list[Any], object_ids: list[int]) -> dict[int, dict[str, Any]]:
         wanted = {str(object_id): object_id for object_id in object_ids}
