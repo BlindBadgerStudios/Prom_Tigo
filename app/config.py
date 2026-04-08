@@ -89,8 +89,8 @@ def load_config() -> AppConfig:
         panel_telemetry_params=_env_csv(
             "PANEL_TELEMETRY_PARAMS",
             ["Pin", "Vin", "Iin", "RSSI", "Temp", "Tmod", "Tcell", "Tamb"] if mode == "cloud"
-            else ["Pin", "Vin", "RSSI", "Iin", "Tmod", "Tcell", "Tamb"] if os.getenv("TIGO_LOCAL_RAW_TEMP_VARIANTS", "").lower() in ("1", "true", "yes")
-            else ["Pin", "Vin", "RSSI"],
+            else ["Pin", "Vin", "Iin", "RSSI", "Tmod", "Tcell", "Tamb"] if os.getenv("TIGO_LOCAL_RAW_TEMP_VARIANTS", "").lower() in ("1", "true", "yes")
+            else ["Pin", "Vin", "Iin", "RSSI"],
         ),
         source_stale_after_seconds=_env_int("SOURCE_STALE_AFTER_SECONDS", 900),
         panel_stale_after_seconds=_env_int("PANEL_STALE_AFTER_SECONDS", 900),
