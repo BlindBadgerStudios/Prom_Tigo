@@ -4,6 +4,8 @@ import logging
 import threading
 import time
 
+import requests.exceptions
+
 from prometheus_client import start_http_server
 from pytigo import TigoCCAClient, TigoClient, TigoClientProtocol
 
@@ -46,6 +48,28 @@ def _build_client(config: AppConfig) -> TigoClientProtocol:
     )
 
 
+_TRANSIENT_ERRORS = (
+    requests.exceptions.ChunkedEncodingError,
+    requests.exceptions.ConnectionError,
+)
+
+
+def _login_with_retry(collector: TigoCollector, config: AppConfig) -> None:
+    max_retries = config.rate_limit_max_retries
+    base_delay = config.rate_limit_base_delay_seconds
+    for attempt in range(max_retries):
+        try:
+            collector.login()
+            return
+        except _TRANSIENT_ERRORS as exc:
+            if attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)
+                logging.warning("Login failed with transient error (%s), retrying in %.1fs (attempt %d/%d)", exc, delay, attempt + 1, max_retries)
+                time.sleep(delay)
+            else:
+                raise
+
+
 def main() -> None:
     config = load_config()
     logging.basicConfig(
@@ -55,7 +79,7 @@ def main() -> None:
     metrics = build_metrics()
     client = _build_client(config)
     collector = TigoCollector(client=client, config=config, metrics=metrics)
-    collector.login()
+    _login_with_retry(collector, config)
     logging.info("Logged in to Tigo (%s mode). Starting exporter on port %d", config.mode, config.listen_port)
     start_http_server(config.listen_port, registry=metrics.registry)
     thread = threading.Thread(

@@ -7,8 +7,14 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import requests
+import requests.exceptions
 
 from pytigo import TigoPage
+
+_TRANSIENT_ERRORS = (
+    requests.exceptions.ChunkedEncodingError,
+    requests.exceptions.ConnectionError,
+)
 
 from .config import AppConfig
 from .metrics import Metrics, clear_labeled_metrics
@@ -324,6 +330,13 @@ class TigoCollector:
                 if exc.response is not None and exc.response.status_code == 429 and attempt < max_retries - 1:
                     delay = base_delay * (2 ** attempt)
                     logger.debug("Rate limited on param %s, retrying in %.1fs (attempt %d/%d)", param, delay, attempt + 1, max_retries)
+                    time.sleep(delay)
+                else:
+                    raise
+            except _TRANSIENT_ERRORS as exc:
+                if attempt < max_retries - 1:
+                    delay = base_delay * (2 ** attempt)
+                    logger.debug("Transient error on param %s (%s), retrying in %.1fs (attempt %d/%d)", param, exc, delay, attempt + 1, max_retries)
                     time.sleep(delay)
                 else:
                     raise
