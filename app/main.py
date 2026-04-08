@@ -54,20 +54,24 @@ _TRANSIENT_ERRORS = (
 )
 
 
+_LOGIN_RETRY_CAP_SECONDS = 60.0
+
+
 def _login_with_retry(collector: TigoCollector, config: AppConfig) -> None:
-    max_retries = config.rate_limit_max_retries
     base_delay = config.rate_limit_base_delay_seconds
-    for attempt in range(max_retries):
+    attempt = 0
+    while True:
         try:
             collector.login()
             return
         except _TRANSIENT_ERRORS as exc:
-            if attempt < max_retries - 1:
-                delay = base_delay * (2 ** attempt)
-                logging.warning("Login failed with transient error (%s), retrying in %.1fs (attempt %d/%d)", exc, delay, attempt + 1, max_retries)
-                time.sleep(delay)
-            else:
-                raise
+            delay = min(base_delay * (2 ** attempt), _LOGIN_RETRY_CAP_SECONDS)
+            logging.warning("Login failed with transient error (%s), retrying in %.1fs (attempt %d)", exc, delay, attempt + 1)
+            time.sleep(delay)
+            attempt += 1
+        except Exception:
+            logging.exception("Login failed with non-retryable error")
+            raise
 
 
 def main() -> None:
