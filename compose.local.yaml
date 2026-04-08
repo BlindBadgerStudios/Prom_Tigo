@@ -3,8 +3,7 @@ services:
     image: blindbadgerstudios/prom_tigo:latest
     container_name: prom_tigo_local
     restart: unless-stopped
-    ports:
-      - "10111:10111"
+    network_mode: host
     environment:
       TIGO_MODE: "local"
       TIGO_LOCAL_HOST: "${TIGO_LOCAL_HOST}"
