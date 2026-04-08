@@ -281,4 +281,4 @@ def test_collect_once_local_falls_back_to_latest_populated_window():
     assert metrics.registry.get_sample_value(
         'tigo_panel_up',
         labels={'system_id': '123', 'panel_id': '1', 'panel_label': 'A1'},
-    ) == 0.0
+    ) == 1.0

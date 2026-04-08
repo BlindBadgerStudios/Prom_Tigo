@@ -297,7 +297,13 @@ class TigoCollector:
                 panel_id=str(panel.panel_id),
                 panel_label=panel.panel_label,
             ).set(sample_ts)
-            is_up = 1 if now_ts - sample_ts <= self.config.panel_stale_after_seconds else 0
+            if getattr(self.config, 'mode', 'cloud') == 'local':
+                # In local mode, a panel can still have valid latest-available telemetry
+                # even when the sample is older than the wall-clock freshness threshold.
+                # Treat presence in the latest populated local sample as panel-up.
+                is_up = 1
+            else:
+                is_up = 1 if now_ts - sample_ts <= self.config.panel_stale_after_seconds else 0
             self.metrics.panel_up.labels(
                 system_id=str(system_id),
                 panel_id=str(panel.panel_id),
