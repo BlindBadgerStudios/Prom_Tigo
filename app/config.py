@@ -51,6 +51,7 @@ class AppConfig:
     local_username: str = "Tigo"
     local_password: str = "$olar"
     local_tz_offset_seconds: int = 0
+    local_enable_raw_temp_variants: bool = False
 
 
 def load_config() -> AppConfig:
@@ -87,7 +88,9 @@ def load_config() -> AppConfig:
         panel_telemetry_window_minutes=_env_int("PANEL_TELEMETRY_WINDOW_MINUTES", 15),
         panel_telemetry_params=_env_csv(
             "PANEL_TELEMETRY_PARAMS",
-            ["Pin", "Vin", "Iin", "RSSI", "Temp", "Tmod", "Tcell", "Tamb"],
+            ["Pin", "Vin", "Iin", "RSSI", "Temp", "Tmod", "Tcell", "Tamb"] if mode == "cloud"
+            else ["Pin", "Vin", "RSSI", "Iin", "Tmod", "Tcell", "Tamb"] if os.getenv("TIGO_LOCAL_RAW_TEMP_VARIANTS", "").lower() in ("1", "true", "yes")
+            else ["Pin", "Vin", "RSSI"],
         ),
         source_stale_after_seconds=_env_int("SOURCE_STALE_AFTER_SECONDS", 900),
         panel_stale_after_seconds=_env_int("PANEL_STALE_AFTER_SECONDS", 900),
@@ -98,4 +101,5 @@ def load_config() -> AppConfig:
         local_username=os.getenv("TIGO_LOCAL_USERNAME", "Tigo"),
         local_password=os.getenv("TIGO_LOCAL_PASSWORD", "$olar"),
         local_tz_offset_seconds=_env_int("TIGO_LOCAL_TZ_OFFSET_SECONDS", 0),
+        local_enable_raw_temp_variants=os.getenv("TIGO_LOCAL_RAW_TEMP_VARIANTS", "").lower() in ("1", "true", "yes"),
     )

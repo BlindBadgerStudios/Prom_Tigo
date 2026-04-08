@@ -37,6 +37,7 @@ def _build_client(config: AppConfig) -> TigoClientProtocol:
             password=config.local_password,
             timeout=config.timeout_seconds,
             tz_offset_seconds=config.local_tz_offset_seconds,
+            enable_raw_temp_variants=config.local_enable_raw_temp_variants,
         )
     return TigoClient(
         username=config.username,
