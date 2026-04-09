@@ -201,6 +201,17 @@ def test_collect_once_populates_metrics():
     ) == 320.5 + 315.2
 
 
+class FakeZeroSummaryClient(FakeClient):
+    def get_summary(self, system_id):
+        return type('Summary', (), {
+            'last_power_dc': 0.0,
+            'daily_energy_dc': 0.0,
+            'ytd_energy_dc': None,
+            'lifetime_energy_dc': None,
+            'updated_on': datetime(2026, 4, 8, 19, 42, tzinfo=UTC),
+        })()
+
+
 class FakeLocalFallbackClient(FakeClient):
     def get_summary(self, system_id):
         return type('Summary', (), {
@@ -234,6 +245,32 @@ class FakeLocalFallbackClient(FakeClient):
             }
             return FakeTable(rows=[FakeRow(timestamp=ts, values=data.get(param, {}))])
         return FakeTable(rows=[])
+
+
+def test_collect_once_exports_zero_system_summary_metrics():
+    metrics = build_metrics()
+    config = AppConfig(
+        mode='local',
+        system_id=123,
+        local_host='192.168.192.114',
+        local_username='Tigo',
+        local_password='$olar',
+        panel_telemetry_params=['Pin', 'Vin', 'Iin', 'RSSI'],
+        panel_stale_after_seconds=900,
+    )
+    collector = TigoCollector(client=FakeZeroSummaryClient(), config=config, metrics=metrics)
+
+    collector.collect_once()
+
+    assert metrics.registry.get_sample_value(
+        'tigo_system_last_power_dc_watts',
+        labels={'system_id': '123', 'system_name': 'Array One'},
+    ) == 0.0
+    assert metrics.registry.get_sample_value(
+        'tigo_system_daily_energy_dc_watt_hours',
+        labels={'system_id': '123', 'system_name': 'Array One'},
+    ) == 0.0
+
 
 
 def test_collect_once_local_falls_back_to_latest_populated_window():
