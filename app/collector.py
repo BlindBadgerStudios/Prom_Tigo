@@ -91,6 +91,8 @@ class TigoCollector:
         self._topology_poll_counter = 0
         self._panels_by_object_id: dict[int, PanelRecord] = {}
         self._latest_power_by_object_id: dict[int, float] = {}
+        self._last_panel_telemetry_by_object_id: dict[int, datetime] = {}
+        self._panel_last_seen_hint_by_object_id: dict[int, datetime] = {}
         self._last_local_device_date: date | None = None
 
     def login(self) -> None:
@@ -250,6 +252,17 @@ class TigoCollector:
                 panel_label=panel.panel_label,
             ).set(0)
 
+    def _record_panel_telemetry_defaults(self) -> None:
+        for panel in self._panels_by_object_id.values():
+            labels = panel.labels()
+            self.metrics.panel_power_watts.labels(**labels).set(0)
+            self.metrics.panel_voltage_volts.labels(**labels).set(0)
+            self.metrics.panel_current_amps.labels(**labels).set(0)
+            self.metrics.panel_signal_strength.labels(**labels).set(0)
+            self.metrics.panel_temperature_celsius.labels(**labels).set(0)
+            for param in self.config.panel_telemetry_params:
+                self.metrics.panel_metric_value.labels(**labels, param=param).set(0)
+
     def _record_panel_telemetry(self, system_id: int, summary: Any) -> None:
         if not self._panels_by_object_id:
             return
@@ -257,11 +270,12 @@ class TigoCollector:
         if not object_ids:
             return
         self._latest_power_by_object_id.clear()
+        self._record_panel_telemetry_defaults()
 
         start, end = self._resolve_panel_window(system_id, object_ids, summary)
         start_str = start.strftime('%Y-%m-%dT%H:%M:%S')
         end_str = end.strftime('%Y-%m-%dT%H:%M:%S')
-        latest_seen: dict[int, float] = {}
+        current_seen: set[int] = set()
         for param in self.config.panel_telemetry_params:
             try:
                 table = self._get_aggregate_with_retry(
@@ -276,37 +290,50 @@ class TigoCollector:
             except Exception:
                 logger.debug("Telemetry param %s unavailable for system %s", param, system_id, exc_info=True)
                 continue
-            latest_values = self._latest_values(table.rows, object_ids)
-            for object_id, sample in latest_values.items():
+
+            latest_values_for_timestamps = self._latest_values(table.rows, object_ids)
+            for object_id, sample in latest_values_for_timestamps.items():
+                sample_dt = sample.get('timestamp')
+                if sample_dt is not None:
+                    previous = self._last_panel_telemetry_by_object_id.get(object_id)
+                    if previous is None or sample_dt > previous:
+                        self._last_panel_telemetry_by_object_id[object_id] = sample_dt
+
+            if getattr(self.config, 'mode', 'cloud') == 'local':
+                current_values = self._latest_row_values(table.rows, object_ids)
+            else:
+                current_values = latest_values_for_timestamps
+
+            for object_id, sample in current_values.items():
                 panel = self._panels_by_object_id.get(object_id)
                 if panel is None:
                     continue
                 labels = panel.labels()
-                sample_ts = _ts(sample['timestamp'])
-                if sample_ts is not None:
-                    latest_seen[object_id] = max(sample_ts, latest_seen.get(object_id, 0.0))
                 value = sample['value']
                 if value is None:
                     continue
+                current_seen.add(object_id)
                 self.metrics.panel_metric_value.labels(**labels, param=param).set(value)
                 self._record_param_specific_metric(param, labels, value, object_id)
+
         now_ts = datetime.now(tz=UTC).timestamp()
         for object_id, panel in self._panels_by_object_id.items():
-            sample_ts = latest_seen.get(object_id)
-            if sample_ts is None:
-                continue
-            self.metrics.panel_last_telemetry_timestamp_seconds.labels(
-                system_id=str(system_id),
-                panel_id=str(panel.panel_id),
-                panel_label=panel.panel_label,
-            ).set(sample_ts)
+            hint_dt = self._panel_last_seen_hint_by_object_id.get(object_id)
+            last_seen_dt = self._last_panel_telemetry_by_object_id.get(object_id)
+            if hint_dt is not None and (last_seen_dt is None or hint_dt > last_seen_dt):
+                last_seen_dt = hint_dt
+                self._last_panel_telemetry_by_object_id[object_id] = hint_dt
+            sample_ts = _ts(last_seen_dt)
+            if sample_ts is not None:
+                self.metrics.panel_last_telemetry_timestamp_seconds.labels(
+                    system_id=str(system_id),
+                    panel_id=str(panel.panel_id),
+                    panel_label=panel.panel_label,
+                ).set(sample_ts)
             if getattr(self.config, 'mode', 'cloud') == 'local':
-                # In local mode, a panel can still have valid latest-available telemetry
-                # even when the sample is older than the wall-clock freshness threshold.
-                # Treat presence in the latest populated local sample as panel-up.
-                is_up = 1
+                is_up = 1 if object_id in current_seen else 0
             else:
-                is_up = 1 if now_ts - sample_ts <= self.config.panel_stale_after_seconds else 0
+                is_up = 1 if sample_ts is not None and now_ts - sample_ts <= self.config.panel_stale_after_seconds else 0
             self.metrics.panel_up.labels(
                 system_id=str(system_id),
                 panel_id=str(panel.panel_id),
@@ -355,6 +382,7 @@ class TigoCollector:
         window_minutes = max(self.config.panel_telemetry_window_minutes, 1)
         end = datetime.now(tz=UTC)
         start = end - timedelta(minutes=window_minutes)
+        self._panel_last_seen_hint_by_object_id = {}
 
         # Cloud mode uses the recent window only. Local mode can have valid current-ish
         # telemetry in the latest populated device-day sample even when the most recent
@@ -374,6 +402,7 @@ class TigoCollector:
                 max_retries=self.config.rate_limit_max_retries,
                 base_delay=self.config.rate_limit_base_delay_seconds,
             )
+            self._panel_last_seen_hint_by_object_id = self._latest_timestamps(pin_recent.rows, object_ids)
             latest_recent_ts = self._latest_row_timestamp(pin_recent.rows, object_ids)
             if latest_recent_ts is not None:
                 return start, end
@@ -395,6 +424,7 @@ class TigoCollector:
                 max_retries=self.config.rate_limit_max_retries,
                 base_delay=self.config.rate_limit_base_delay_seconds,
             )
+            self._panel_last_seen_hint_by_object_id = self._latest_timestamps(pin_day.rows, object_ids)
             latest_day_ts = self._latest_row_timestamp(pin_day.rows, object_ids)
             if latest_day_ts is not None:
                 fallback_end = latest_day_ts
@@ -425,6 +455,43 @@ class TigoCollector:
                 if value is None:
                     continue
                 latest[object_id] = {'timestamp': timestamp, 'value': value}
+            if len(latest) == len(wanted):
+                break
+        return latest
+
+    def _latest_row_values(self, rows: list[Any], object_ids: list[int]) -> dict[int, dict[str, Any]]:
+        latest_ts = self._latest_row_timestamp(rows, object_ids)
+        if latest_ts is None:
+            return {}
+        wanted = {str(object_id): object_id for object_id in object_ids}
+        for row in reversed(rows):
+            timestamp = getattr(row, 'timestamp', None)
+            values = getattr(row, 'values', {}) or {}
+            if timestamp != latest_ts:
+                continue
+            current: dict[int, dict[str, Any]] = {}
+            for key, object_id in wanted.items():
+                value = _coerce_float(values.get(key))
+                if value is None:
+                    continue
+                current[object_id] = {'timestamp': timestamp, 'value': value}
+            return current
+        return {}
+
+    def _latest_timestamps(self, rows: list[Any], object_ids: list[int]) -> dict[int, datetime]:
+        wanted = {str(object_id): object_id for object_id in object_ids}
+        latest: dict[int, datetime] = {}
+        for row in reversed(rows):
+            timestamp = getattr(row, 'timestamp', None)
+            values = getattr(row, 'values', {}) or {}
+            if timestamp is None:
+                continue
+            for key, object_id in wanted.items():
+                if object_id in latest:
+                    continue
+                if _coerce_float(values.get(key)) is None:
+                    continue
+                latest[object_id] = timestamp
             if len(latest) == len(wanted):
                 break
         return latest

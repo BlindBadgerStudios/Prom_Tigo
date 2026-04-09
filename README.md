@@ -41,6 +41,8 @@ Topology/panel identity:
 - `tigo_panel_up`
 - `tigo_panel_last_telemetry_timestamp_seconds`
 
+In local CCA mode, panel telemetry series are emitted for every known panel from topology even after a panel stops reporting in the freshest CCA sample. When a panel drops out of the latest sample, the exporter keeps publishing its telemetry gauges at `0` and sets `tigo_panel_up` to `0`, while `tigo_panel_last_telemetry_timestamp_seconds` preserves the last timestamp where telemetry was actually seen.
+
 Panel telemetry:
 - `tigo_panel_power_watts`
 - `tigo_panel_voltage_volts`
