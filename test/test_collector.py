@@ -541,3 +541,103 @@ def test_collect_once_local_keeps_all_panels_exported_with_zero_when_offline():
         'tigo_panel_up',
         labels={'system_id': '123', 'panel_id': '2', 'panel_label': 'A2'},
     ) == 1.0
+
+
+class FakeLocalStaleDateClient(FakeClient):
+    def get_summary(self, system_id):
+        return type('Summary', (), {
+            'last_power_dc': 0.0,
+            'daily_energy_dc': 0.0,
+            'ytd_energy_dc': None,
+            'lifetime_energy_dc': None,
+            'updated_on': datetime(2026, 4, 8, 20, 43, tzinfo=UTC),
+        })()
+
+    def _get(self, path, params=None):
+        assert path == '/cgi-bin/summary_jsconfig'
+        return {'sDate': '2026-04-08'}
+
+    def get_aggregate(self, system_id, *, start, end, level, param, object_ids, header):
+        recent_start = '2026-04-09T07:30:00'
+        recent_end = '2026-04-09T07:45:00'
+        stale_day_start = '2026-04-08T00:00:00'
+        stale_day_end = '2026-04-08T23:59:59'
+        live_day_start = '2026-04-09T00:00:00'
+        live_day_end = '2026-04-09T23:59:59'
+        live_window_start = '2026-04-09T07:28:00'
+        live_window_end = '2026-04-09T07:43:00'
+        if start == recent_start and end == recent_end:
+            return FakeTable(rows=[])
+        if start == stale_day_start and end == stale_day_end:
+            return FakeTable(rows=[
+                FakeRow(timestamp=datetime(2026, 4, 8, 20, 43, tzinfo=UTC), values={'1001': 0.0, '1002': 0.0}),
+            ])
+        if start == live_day_start and end == live_day_end:
+            return FakeTable(rows=[
+                FakeRow(timestamp=datetime(2026, 4, 9, 7, 43, tzinfo=UTC), values={'1001': 80.0, '1002': 70.0}),
+            ])
+        if start == live_window_start and end == live_window_end:
+            rows_by_param = {
+                'Pin': {'1001': 80.0, '1002': 70.0},
+                'Vin': {'1001': 35.0, '1002': 34.0},
+                'Iin': {'1001': 2.2857142857, '1002': 2.0588235294},
+                'RSSI': {'1001': 168.0, '1002': 161.0},
+            }
+            return FakeTable(rows=[
+                FakeRow(timestamp=datetime(2026, 4, 9, 7, 43, tzinfo=UTC), values=rows_by_param.get(param, {})),
+            ])
+        return FakeTable(rows=[])
+
+
+def test_collect_once_local_uses_fresher_today_when_summary_jsconfig_date_is_stale():
+    metrics = build_metrics()
+    config = AppConfig(
+        mode='local',
+        system_id=123,
+        local_host='192.168.192.114',
+        local_username='Tigo',
+        local_password='$olar',
+        panel_telemetry_params=['Pin', 'Vin', 'Iin', 'RSSI'],
+        panel_stale_after_seconds=900,
+    )
+    collector = TigoCollector(client=FakeLocalStaleDateClient(), config=config, metrics=metrics)
+
+    import app.collector as collector_module
+    real_datetime = collector_module.datetime
+
+    class FakeDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 4, 9, 7, 45, 0, tzinfo=tz or UTC)
+
+    collector_module.datetime = FakeDateTime
+    try:
+        collector.collect_once()
+    finally:
+        collector_module.datetime = real_datetime
+
+    panel1_labels = {
+        'system_id': '123',
+        'panel_id': '1',
+        'panel_label': 'A1',
+        'panel_serial': 'OPT-A1',
+        'panel_type': 'TS4',
+        'inverter_id': '500',
+        'inverter_label': 'INV-1',
+        'mppt_id': '400',
+        'mppt_label': 'MPPT 1',
+        'string_id': '300',
+        'string_label': 'String A',
+        'source_id': '200',
+        'object_id': '1001',
+        'datasource': 'SOURCE.panels.A1',
+    }
+    assert metrics.registry.get_sample_value('tigo_panel_power_watts', labels=panel1_labels) == 80.0
+    assert metrics.registry.get_sample_value(
+        'tigo_panel_last_telemetry_timestamp_seconds',
+        labels={'system_id': '123', 'panel_id': '1', 'panel_label': 'A1'},
+    ) == datetime(2026, 4, 9, 7, 43, tzinfo=UTC).timestamp()
+    assert metrics.registry.get_sample_value(
+        'tigo_system_last_power_dc_watts',
+        labels={'system_id': '123', 'system_name': 'Array One'},
+    ) == 150.0

@@ -93,6 +93,7 @@ class TigoCollector:
         self._latest_power_by_object_id: dict[int, float] = {}
         self._last_panel_telemetry_by_object_id: dict[int, datetime] = {}
         self._panel_last_seen_hint_by_object_id: dict[int, datetime] = {}
+        self._local_summary_override_active = False
         self._last_local_device_date: date | None = None
 
     def login(self) -> None:
@@ -123,6 +124,7 @@ class TigoCollector:
         self._record_panel_topology()
         self._record_panel_status_defaults(system_id)
         self._record_panel_telemetry(system_id, summary)
+        self._record_local_summary_overrides(system)
         self._record_inverter_and_string_rollups()
 
     def _safe_get_alerts(self, system_id: int) -> TigoPage:
@@ -383,6 +385,7 @@ class TigoCollector:
         end = datetime.now(tz=UTC)
         start = end - timedelta(minutes=window_minutes)
         self._panel_last_seen_hint_by_object_id = {}
+        self._local_summary_override_active = False
 
         # Cloud mode uses the recent window only. Local mode can have valid current-ish
         # telemetry in the latest populated device-day sample even when the most recent
@@ -410,28 +413,36 @@ class TigoCollector:
             logger.debug('Recent Pin window lookup failed for system %s', system_id, exc_info=True)
 
         local_device_date = self._get_local_device_date(summary)
-        if local_device_date is None:
-            return start, end
 
-        fallback_day_start, fallback_day_end = self._local_date_bounds_to_utc(local_device_date)
-        try:
-            pin_day = self._get_aggregate_with_retry(
-                system_id,
-                start=fallback_day_start.strftime('%Y-%m-%dT%H:%M:%S'),
-                end=fallback_day_end.strftime('%Y-%m-%dT%H:%M:%S'),
-                param='Pin',
-                object_ids=object_ids,
-                max_retries=self.config.rate_limit_max_retries,
-                base_delay=self.config.rate_limit_base_delay_seconds,
-            )
-            self._panel_last_seen_hint_by_object_id = self._latest_timestamps(pin_day.rows, object_ids)
-            latest_day_ts = self._latest_row_timestamp(pin_day.rows, object_ids)
-            if latest_day_ts is not None:
-                fallback_end = latest_day_ts
-                fallback_start = fallback_end - timedelta(minutes=window_minutes)
-                return fallback_start, fallback_end
-        except Exception:
-            logger.debug('Device-day Pin lookup failed for system %s', system_id, exc_info=True)
+        best_candidate: tuple[datetime, date, dict[int, datetime]] | None = None
+        for candidate_date in self._candidate_local_dates(summary, local_device_date):
+            candidate_start, candidate_end = self._local_date_bounds_to_utc(candidate_date)
+            try:
+                pin_day = self._get_aggregate_with_retry(
+                    system_id,
+                    start=candidate_start.strftime('%Y-%m-%dT%H:%M:%S'),
+                    end=candidate_end.strftime('%Y-%m-%dT%H:%M:%S'),
+                    param='Pin',
+                    object_ids=object_ids,
+                    max_retries=self.config.rate_limit_max_retries,
+                    base_delay=self.config.rate_limit_base_delay_seconds,
+                )
+                candidate_hints = self._latest_timestamps(pin_day.rows, object_ids)
+                candidate_latest_ts = self._latest_row_timestamp(pin_day.rows, object_ids)
+                if candidate_latest_ts is None:
+                    continue
+                if best_candidate is None or candidate_latest_ts > best_candidate[0]:
+                    best_candidate = (candidate_latest_ts, candidate_date, candidate_hints)
+            except Exception:
+                logger.debug('Device-day Pin lookup failed for system %s on %s', system_id, candidate_date, exc_info=True)
+
+        if best_candidate is not None:
+            latest_ts, chosen_date, candidate_hints = best_candidate
+            self._panel_last_seen_hint_by_object_id = candidate_hints
+            self._local_summary_override_active = local_device_date is not None and chosen_date != local_device_date
+            fallback_end = latest_ts
+            fallback_start = fallback_end - timedelta(minutes=window_minutes)
+            return fallback_start, fallback_end
 
         summary_updated = getattr(summary, 'updated_on', None)
         if summary_updated is None:
@@ -521,6 +532,28 @@ class TigoCollector:
                 return None
         return None
 
+    def _candidate_local_dates(self, summary: Any, hinted_device_date: date | None) -> list[date]:
+        candidates: list[date] = []
+
+        def add(candidate: date | None) -> None:
+            if candidate is None:
+                return
+            if candidate not in candidates:
+                candidates.append(candidate)
+
+        add(hinted_device_date)
+
+        offset = timedelta(seconds=getattr(self.config, 'local_tz_offset_seconds', 0))
+        add((datetime.now(tz=UTC) + offset).date())
+
+        summary_updated = getattr(summary, 'updated_on', None)
+        if summary_updated is not None and hasattr(summary_updated, 'date'):
+            if getattr(summary_updated, 'tzinfo', None) is None:
+                summary_updated = summary_updated.replace(tzinfo=UTC)
+            add((summary_updated + offset).date())
+
+        return candidates
+
     def _local_date_bounds_to_utc(self, local_device_date: date) -> tuple[datetime, datetime]:
         local_start = datetime.combine(local_device_date, dt_time.min)
         local_end = datetime.combine(local_device_date, dt_time(23, 59, 59))
@@ -553,6 +586,22 @@ class TigoCollector:
             summary_updated = summary_updated.replace(tzinfo=UTC)
         local_summary = (summary_updated + offset).date()
         return local_summary
+
+    def _record_local_summary_overrides(self, system: Any) -> None:
+        if getattr(self.config, 'mode', 'cloud') != 'local':
+            return
+        if not self._local_summary_override_active:
+            return
+        system_id = str(system.system_id)
+        system_name = system.name or f"system_{system.system_id}"
+        if self._latest_power_by_object_id:
+            total_power = sum(self._latest_power_by_object_id.values())
+            self.metrics.system_last_power_dc_watts.labels(system_id=system_id, system_name=system_name).set(total_power)
+        if self._last_panel_telemetry_by_object_id:
+            latest_ts = max(self._last_panel_telemetry_by_object_id.values())
+            latest_ts_value = _ts(latest_ts)
+            if latest_ts_value is not None:
+                self.metrics.system_summary_updated_timestamp_seconds.labels(system_id=system_id, system_name=system_name).set(latest_ts_value)
 
     def _record_param_specific_metric(self, param: str, labels: dict[str, str], value: float, object_id: int) -> None:
         if param in POWER_PARAMS:
