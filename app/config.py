@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 def _env_int(name: str, default: int) -> int:
@@ -24,6 +26,28 @@ def _env_csv(name: str, default: list[str]) -> list[str]:
     if value in (None, ""):
         return default
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _parse_utc_offset_seconds(value: str) -> int:
+    sign = 1 if value[0] == '+' else -1
+    hours = int(value[1:3])
+    minutes = int(value[4:6])
+    return sign * ((hours * 3600) + (minutes * 60))
+
+
+def _resolve_local_tz_offset_seconds(timezone_name: str, utc_offset: str, legacy_seconds: int) -> int:
+    if timezone_name:
+        try:
+            zone = ZoneInfo(timezone_name)
+        except ZoneInfoNotFoundError as exc:
+            raise RuntimeError(f"Invalid TIGO_LOCAL_TIMEZONE: {timezone_name!r}") from exc
+        offset = datetime.now(zone).utcoffset()
+        return int(offset.total_seconds()) if offset is not None else 0
+    if utc_offset:
+        if len(utc_offset) != 6 or utc_offset[0] not in '+-' or utc_offset[3] != ':':
+            raise RuntimeError(f"Invalid TIGO_LOCAL_UTC_OFFSET: {utc_offset!r}; expected ±HH:MM")
+        return _parse_utc_offset_seconds(utc_offset)
+    return legacy_seconds
 
 
 @dataclass(slots=True)
@@ -50,6 +74,8 @@ class AppConfig:
     local_host: str = ""
     local_username: str = "Tigo"
     local_password: str = "$olar"
+    local_timezone: str = ""
+    local_utc_offset: str = ""
     local_tz_offset_seconds: int = 0
     local_enable_raw_temp_variants: bool = False
 
@@ -74,6 +100,14 @@ def load_config() -> AppConfig:
             raise RuntimeError("TIGO_LOCAL_HOST must be set in local mode")
     else:
         local_host = os.getenv("TIGO_LOCAL_HOST", "")
+
+    local_timezone = os.getenv("TIGO_LOCAL_TIMEZONE", "")
+    local_utc_offset = os.getenv("TIGO_LOCAL_UTC_OFFSET", "")
+    local_tz_offset_seconds = _resolve_local_tz_offset_seconds(
+        local_timezone,
+        local_utc_offset,
+        _env_int("TIGO_LOCAL_TZ_OFFSET_SECONDS", 0),
+    )
 
     return AppConfig(
         mode=mode,
@@ -100,6 +134,8 @@ def load_config() -> AppConfig:
         local_host=local_host,
         local_username=os.getenv("TIGO_LOCAL_USERNAME", "Tigo"),
         local_password=os.getenv("TIGO_LOCAL_PASSWORD", "$olar"),
-        local_tz_offset_seconds=_env_int("TIGO_LOCAL_TZ_OFFSET_SECONDS", 0),
+        local_timezone=local_timezone,
+        local_utc_offset=local_utc_offset,
+        local_tz_offset_seconds=local_tz_offset_seconds,
         local_enable_raw_temp_variants=os.getenv("TIGO_LOCAL_RAW_TEMP_VARIANTS", "").lower() in ("1", "true", "yes"),
     )

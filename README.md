@@ -88,6 +88,15 @@ Optional:
 - `PANEL_STALE_AFTER_SECONDS` - default `900`
 - `ALERT_FETCH_LIMIT` - default `200`
 
+Local mode extras:
+- `TIGO_MODE=local`
+- `TIGO_LOCAL_HOST`
+- `TIGO_LOCAL_USERNAME` - default `Tigo`
+- `TIGO_LOCAL_PASSWORD` - default `$olar`
+- `TIGO_LOCAL_TIMEZONE` - optional IANA timezone name like `America/Los_Angeles` (recommended)
+- `TIGO_LOCAL_UTC_OFFSET` - optional offset string like `-07:00`
+- `TIGO_LOCAL_TZ_OFFSET_SECONDS` - legacy raw offset fallback; default `0`
+
 ## Prometheus scrape config example
 
 ```yaml
