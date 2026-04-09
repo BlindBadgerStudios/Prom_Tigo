@@ -214,10 +214,16 @@ class FakeLocalFallbackClient(FakeClient):
     def get_aggregate(self, system_id, *, start, end, level, param, object_ids, header):
         recent_start = '2026-04-08T17:45:00'
         recent_end = '2026-04-08T18:00:00'
+        full_day_start = '2026-04-08T00:00:00'
+        full_day_end = '2026-04-08T23:59:59'
         fallback_start = '2026-04-08T10:49:00'
         fallback_end = '2026-04-08T11:04:00'
         if start == recent_start and end == recent_end:
             return FakeTable(rows=[])
+        if start == full_day_start and end == full_day_end:
+            return FakeTable(rows=[
+                FakeRow(timestamp=datetime(2026, 4, 8, 11, 4, tzinfo=UTC), values={'1001': 335.0, '1002': 334.0}),
+            ])
         if start == fallback_start and end == fallback_end:
             ts = datetime(2026, 4, 8, 11, 4, tzinfo=UTC)
             data = {
@@ -278,6 +284,102 @@ def test_collect_once_local_falls_back_to_latest_populated_window():
     assert metrics.registry.get_sample_value('tigo_panel_voltage_volts', labels=panel_labels) == 3.2
     assert metrics.registry.get_sample_value('tigo_panel_current_amps', labels=panel_labels) == 104.6875
     assert metrics.registry.get_sample_value('tigo_panel_signal_strength', labels=panel_labels) == 150.0
+    assert metrics.registry.get_sample_value(
+        'tigo_panel_up',
+        labels={'system_id': '123', 'panel_id': '1', 'panel_label': 'A1'},
+    ) == 1.0
+
+
+class FakeLocalZeroTelemetryClient(FakeClient):
+    def get_summary(self, system_id):
+        return type('Summary', (), {
+            'last_power_dc': None,
+            'daily_energy_dc': None,
+            'ytd_energy_dc': None,
+            'lifetime_energy_dc': None,
+            'updated_on': datetime(2026, 4, 9, 23, 59, 59, tzinfo=UTC),
+        })()
+
+    def _get(self, path, params=None):
+        assert path == '/cgi-bin/summary_jsconfig'
+        return {'sDate': '2026-04-08'}
+
+    def get_aggregate(self, system_id, *, start, end, level, param, object_ids, header):
+        recent_start = '2026-04-08T19:45:00'
+        recent_end = '2026-04-08T20:00:00'
+        full_day_start = '2026-04-08T00:00:00'
+        full_day_end = '2026-04-08T23:59:59'
+        latest_window_start = '2026-04-08T19:27:00'
+        latest_window_end = '2026-04-08T19:42:00'
+        if start == recent_start and end == recent_end:
+            return FakeTable(rows=[])
+        if start == full_day_start and end == full_day_end:
+            return FakeTable(rows=[
+                FakeRow(timestamp=datetime(2026, 4, 8, 19, 42, tzinfo=UTC), values={'1001': 0.0, '1002': 0.0}),
+            ])
+        if start == latest_window_start and end == latest_window_end:
+            ts = datetime(2026, 4, 8, 19, 42, tzinfo=UTC)
+            data = {
+                'Pin': {'1001': 0.0, '1002': 0.0},
+                'Vin': {'1001': 27.0, '1002': 27.0},
+                'Iin': {'1001': 0.0, '1002': 0.0},
+                'RSSI': {'1001': 177.0, '1002': 168.0},
+            }
+            return FakeTable(rows=[FakeRow(timestamp=ts, values=data.get(param, {}))])
+        return FakeTable(rows=[])
+
+
+def test_collect_once_local_uses_device_date_and_exports_zero_panel_values():
+    metrics = build_metrics()
+    config = AppConfig(
+        mode='local',
+        system_id=123,
+        local_host='192.168.192.114',
+        local_username='Tigo',
+        local_password='$olar',
+        panel_telemetry_params=['Pin', 'Vin', 'Iin', 'RSSI'],
+        panel_stale_after_seconds=900,
+    )
+    collector = TigoCollector(client=FakeLocalZeroTelemetryClient(), config=config, metrics=metrics)
+
+    import app.collector as collector_module
+    real_datetime = collector_module.datetime
+
+    class FakeDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 4, 8, 20, 0, 0, tzinfo=tz or UTC)
+
+    collector_module.datetime = FakeDateTime
+    try:
+        collector.collect_once()
+    finally:
+        collector_module.datetime = real_datetime
+
+    panel_labels = {
+        'system_id': '123',
+        'panel_id': '1',
+        'panel_label': 'A1',
+        'panel_serial': 'OPT-A1',
+        'panel_type': 'TS4',
+        'inverter_id': '500',
+        'inverter_label': 'INV-1',
+        'mppt_id': '400',
+        'mppt_label': 'MPPT 1',
+        'string_id': '300',
+        'string_label': 'String A',
+        'source_id': '200',
+        'object_id': '1001',
+        'datasource': 'SOURCE.panels.A1',
+    }
+    assert metrics.registry.get_sample_value('tigo_panel_power_watts', labels=panel_labels) == 0.0
+    assert metrics.registry.get_sample_value('tigo_panel_voltage_volts', labels=panel_labels) == 27.0
+    assert metrics.registry.get_sample_value('tigo_panel_current_amps', labels=panel_labels) == 0.0
+    assert metrics.registry.get_sample_value('tigo_panel_signal_strength', labels=panel_labels) == 177.0
+    assert metrics.registry.get_sample_value(
+        'tigo_panel_last_telemetry_timestamp_seconds',
+        labels={'system_id': '123', 'panel_id': '1', 'panel_label': 'A1'},
+    ) == datetime(2026, 4, 8, 19, 42, tzinfo=UTC).timestamp()
     assert metrics.registry.get_sample_value(
         'tigo_panel_up',
         labels={'system_id': '123', 'panel_id': '1', 'panel_label': 'A1'},

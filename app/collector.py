@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time as dt_time, timedelta
 from typing import Any
 
 import requests
@@ -91,9 +91,12 @@ class TigoCollector:
         self._topology_poll_counter = 0
         self._panels_by_object_id: dict[int, PanelRecord] = {}
         self._latest_power_by_object_id: dict[int, float] = {}
+        self._last_local_device_date: date | None = None
 
     def login(self) -> None:
-        self.client.login()
+        auth = self.client.login()
+        raw = getattr(auth, 'raw', None) or {}
+        self._last_local_device_date = self._parse_local_device_date(raw.get('sDate'))
 
     def resolve_system_id(self) -> int:
         if self._system_id is not None:
@@ -354,8 +357,10 @@ class TigoCollector:
         start = end - timedelta(minutes=window_minutes)
 
         # Cloud mode uses the recent window only. Local mode can have valid current-ish
-        # telemetry in the latest populated sample even when the most recent wall-clock
-        # window is empty, so fall back to the summary timestamp when needed.
+        # telemetry in the latest populated device-day sample even when the most recent
+        # wall-clock window is empty, and the summary timestamp can drift onto the wrong
+        # day. When recent data is empty, scan the device-reported local day for the
+        # freshest row that contains any numeric Pin sample, including zeros.
         if getattr(self.config, 'mode', 'cloud') != 'local':
             return start, end
 
@@ -369,10 +374,34 @@ class TigoCollector:
                 max_retries=self.config.rate_limit_max_retries,
                 base_delay=self.config.rate_limit_base_delay_seconds,
             )
-            if self._latest_values(pin_recent.rows, object_ids):
+            latest_recent_ts = self._latest_row_timestamp(pin_recent.rows, object_ids)
+            if latest_recent_ts is not None:
                 return start, end
         except Exception:
             logger.debug('Recent Pin window lookup failed for system %s', system_id, exc_info=True)
+
+        local_device_date = self._get_local_device_date(summary)
+        if local_device_date is None:
+            return start, end
+
+        fallback_day_start, fallback_day_end = self._local_date_bounds_to_utc(local_device_date)
+        try:
+            pin_day = self._get_aggregate_with_retry(
+                system_id,
+                start=fallback_day_start.strftime('%Y-%m-%dT%H:%M:%S'),
+                end=fallback_day_end.strftime('%Y-%m-%dT%H:%M:%S'),
+                param='Pin',
+                object_ids=object_ids,
+                max_retries=self.config.rate_limit_max_retries,
+                base_delay=self.config.rate_limit_base_delay_seconds,
+            )
+            latest_day_ts = self._latest_row_timestamp(pin_day.rows, object_ids)
+            if latest_day_ts is not None:
+                fallback_end = latest_day_ts
+                fallback_start = fallback_end - timedelta(minutes=window_minutes)
+                return fallback_start, fallback_end
+        except Exception:
+            logger.debug('Device-day Pin lookup failed for system %s', system_id, exc_info=True)
 
         summary_updated = getattr(summary, 'updated_on', None)
         if summary_updated is None:
@@ -399,6 +428,64 @@ class TigoCollector:
             if len(latest) == len(wanted):
                 break
         return latest
+
+    def _latest_row_timestamp(self, rows: list[Any], object_ids: list[int]) -> datetime | None:
+        wanted = {str(object_id) for object_id in object_ids}
+        for row in reversed(rows):
+            timestamp = getattr(row, 'timestamp', None)
+            values = getattr(row, 'values', {}) or {}
+            if timestamp is None:
+                continue
+            if any(_coerce_float(values.get(key)) is not None for key in wanted):
+                return timestamp
+        return None
+
+    def _parse_local_device_date(self, value: Any) -> date | None:
+        if not value:
+            return None
+        if isinstance(value, date) and not isinstance(value, datetime):
+            return value
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, str):
+            try:
+                return date.fromisoformat(value)
+            except ValueError:
+                return None
+        return None
+
+    def _local_date_bounds_to_utc(self, local_device_date: date) -> tuple[datetime, datetime]:
+        local_start = datetime.combine(local_device_date, dt_time.min)
+        local_end = datetime.combine(local_device_date, dt_time(23, 59, 59))
+        offset = timedelta(seconds=getattr(self.config, 'local_tz_offset_seconds', 0))
+        return local_start - offset, local_end - offset
+
+    def _get_local_device_date(self, summary: Any) -> date | None:
+        if getattr(self.config, 'mode', 'cloud') != 'local':
+            return None
+
+        fetcher = getattr(self.client, '_get', None)
+        if callable(fetcher):
+            try:
+                data = fetcher('/cgi-bin/summary_jsconfig')
+                device_date = self._parse_local_device_date((data or {}).get('sDate'))
+                if device_date is not None:
+                    self._last_local_device_date = device_date
+                    return device_date
+            except Exception:
+                logger.debug('Could not refresh local device date from summary_jsconfig', exc_info=True)
+
+        if self._last_local_device_date is not None:
+            return self._last_local_device_date
+
+        summary_updated = getattr(summary, 'updated_on', None)
+        if summary_updated is None or not hasattr(summary_updated, 'date'):
+            return None
+        offset = timedelta(seconds=getattr(self.config, 'local_tz_offset_seconds', 0))
+        if getattr(summary_updated, 'tzinfo', None) is None:
+            summary_updated = summary_updated.replace(tzinfo=UTC)
+        local_summary = (summary_updated + offset).date()
+        return local_summary
 
     def _record_param_specific_metric(self, param: str, labels: dict[str, str], value: float, object_id: int) -> None:
         if param in POWER_PARAMS:
