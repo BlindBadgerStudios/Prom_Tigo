@@ -201,6 +201,26 @@ def test_collect_once_populates_metrics():
     ) == 320.5 + 315.2
 
 
+def test_cloud_panel_window_uses_system_local_timezone_and_normalizes_samples():
+    metrics = build_metrics()
+    config = AppConfig(mode='cloud', system_id=123, panel_telemetry_window_minutes=15)
+    collector = TigoCollector(client=FakeClient(), config=config, metrics=metrics)
+    system = FakeClient().get_system(123)
+
+    start, end = collector._resolve_panel_window(123, [1001], FakeClient().get_summary(123), system)
+    expected_local_now = datetime.now(__import__('zoneinfo').ZoneInfo('America/Chicago')).replace(tzinfo=None)
+
+    assert start.tzinfo is None
+    assert end.tzinfo is None
+    assert abs((expected_local_now - end).total_seconds()) < 5
+    assert end - start == timedelta(minutes=15)
+
+    table = FakeTable(rows=[FakeRow(timestamp=datetime(2026, 4, 3, 7, 0), values={'1001': 1.0})])
+    collector._normalize_cloud_table_timestamps(table, system)
+
+    assert table.rows[0].timestamp == datetime(2026, 4, 3, 12, 0, tzinfo=UTC)
+
+
 class FakeZeroSummaryClient(FakeClient):
     def get_summary(self, system_id):
         return type('Summary', (), {

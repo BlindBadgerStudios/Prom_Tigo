@@ -8,6 +8,7 @@ from typing import Any
 
 import requests
 import requests.exceptions
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pytigo import TigoPage
 
@@ -123,7 +124,7 @@ class TigoCollector:
         self._record_source_metrics(system_id, sources)
         self._record_panel_topology()
         self._record_panel_status_defaults(system_id)
-        self._record_panel_telemetry(system_id, summary)
+        self._record_panel_telemetry(system_id, summary, system)
         self._record_local_summary_overrides(system)
         self._record_inverter_and_string_rollups()
 
@@ -265,7 +266,7 @@ class TigoCollector:
             for param in self.config.panel_telemetry_params:
                 self.metrics.panel_metric_value.labels(**labels, param=param).set(0)
 
-    def _record_panel_telemetry(self, system_id: int, summary: Any) -> None:
+    def _record_panel_telemetry(self, system_id: int, summary: Any, system: Any) -> None:
         if not self._panels_by_object_id:
             return
         object_ids = sorted(self._panels_by_object_id.keys())
@@ -274,7 +275,7 @@ class TigoCollector:
         self._latest_power_by_object_id.clear()
         self._record_panel_telemetry_defaults()
 
-        start, end = self._resolve_panel_window(system_id, object_ids, summary)
+        start, end = self._resolve_panel_window(system_id, object_ids, summary, system)
         start_str = start.strftime('%Y-%m-%dT%H:%M:%S')
         end_str = end.strftime('%Y-%m-%dT%H:%M:%S')
         current_seen: set[int] = set()
@@ -293,6 +294,8 @@ class TigoCollector:
                 logger.debug("Telemetry param %s unavailable for system %s", param, system_id, exc_info=True)
                 continue
 
+            if getattr(self.config, 'mode', 'cloud') != 'local':
+                self._normalize_cloud_table_timestamps(table, system)
             latest_values_for_timestamps = self._latest_values(table.rows, object_ids)
             for object_id, sample in latest_values_for_timestamps.items():
                 sample_dt = sample.get('timestamp')
@@ -380,9 +383,16 @@ class TigoCollector:
                     raise
         raise RuntimeError("unreachable")
 
-    def _resolve_panel_window(self, system_id: int, object_ids: list[int], summary: Any) -> tuple[datetime, datetime]:
+    def _resolve_panel_window(self, system_id: int, object_ids: list[int], summary: Any, system: Any) -> tuple[datetime, datetime]:
         window_minutes = max(self.config.panel_telemetry_window_minutes, 1)
-        end = datetime.now(tz=UTC)
+        if getattr(self.config, 'mode', 'cloud') == 'local':
+            end = datetime.now(tz=UTC)
+        else:
+            # The cloud /data/aggregate endpoint expects naive timestamps in the
+            # system's local timezone. Supplying naive UTC windows succeeds but
+            # returns timestamp-only CSV rows with no panel values.
+            zone = self._system_timezone(system)
+            end = datetime.now(tz=zone).replace(tzinfo=None)
         start = end - timedelta(minutes=window_minutes)
         self._panel_last_seen_hint_by_object_id = {}
         self._local_summary_override_active = False
@@ -452,6 +462,26 @@ class TigoCollector:
         fallback_end = summary_updated
         fallback_start = fallback_end - timedelta(minutes=window_minutes)
         return fallback_start, fallback_end
+
+    def _system_timezone(self, system: Any):
+        timezone_name = getattr(system, 'timezone', None)
+        if timezone_name:
+            try:
+                return ZoneInfo(str(timezone_name))
+            except ZoneInfoNotFoundError:
+                logger.warning("Invalid Tigo system timezone %r; falling back to UTC", timezone_name)
+        return UTC
+
+    def _normalize_cloud_table_timestamps(self, table: Any, system: Any) -> None:
+        zone = self._system_timezone(system)
+        for row in getattr(table, 'rows', []) or []:
+            timestamp = getattr(row, 'timestamp', None)
+            if timestamp is None:
+                continue
+            if timestamp.tzinfo is None:
+                row.timestamp = timestamp.replace(tzinfo=zone).astimezone(UTC)
+            else:
+                row.timestamp = timestamp.astimezone(UTC)
 
     def _latest_values(self, rows: list[Any], object_ids: list[int]) -> dict[int, dict[str, Any]]:
         wanted = {str(object_id): object_id for object_id in object_ids}
