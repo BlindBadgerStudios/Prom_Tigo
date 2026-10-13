@@ -484,7 +484,7 @@ class FakeLocalOfflinePanelClient(FakeClient):
         return FakeTable(rows=[])
 
 
-def test_collect_once_local_keeps_all_panels_exported_with_zero_when_offline():
+def test_collect_once_local_omits_values_for_offline_panels_instead_of_zero():
     metrics = build_metrics()
     config = AppConfig(
         mode='local',
@@ -536,10 +536,11 @@ def test_collect_once_local_keeps_all_panels_exported_with_zero_when_offline():
         'datasource': 'SOURCE.panels.A2',
     }
 
-    assert metrics.registry.get_sample_value('tigo_panel_power_watts', labels=panel1_labels) == 0.0
-    assert metrics.registry.get_sample_value('tigo_panel_voltage_volts', labels=panel1_labels) == 0.0
-    assert metrics.registry.get_sample_value('tigo_panel_current_amps', labels=panel1_labels) == 0.0
-    assert metrics.registry.get_sample_value('tigo_panel_signal_strength', labels=panel1_labels) == 0.0
+    assert metrics.registry.get_sample_value('tigo_panel_power_watts', labels=panel1_labels) is None
+    assert metrics.registry.get_sample_value('tigo_panel_voltage_volts', labels=panel1_labels) is None
+    assert metrics.registry.get_sample_value('tigo_panel_current_amps', labels=panel1_labels) is None
+    assert metrics.registry.get_sample_value('tigo_panel_signal_strength', labels=panel1_labels) is None
+    assert metrics.registry.get_sample_value('tigo_panel_metric_value', labels={**panel1_labels, 'param': 'Pin'}) is None
     assert metrics.registry.get_sample_value(
         'tigo_panel_last_telemetry_timestamp_seconds',
         labels={'system_id': '123', 'panel_id': '1', 'panel_label': 'A1'},

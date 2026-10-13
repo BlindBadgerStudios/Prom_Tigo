@@ -11,6 +11,7 @@ class Metrics:
     exporter_last_success_timestamp: Gauge
     exporter_poll_duration: Gauge
     exporter_errors_total: Counter
+    exporter_api_errors_total: Counter
     system_info: Gauge
     system_recent_alerts_count: Gauge
     system_has_monitored_modules: Gauge
@@ -46,6 +47,13 @@ class Metrics:
 
 def build_metrics(registry: CollectorRegistry | None = None) -> Metrics:
     registry = registry or CollectorRegistry()
+    metrics = _build_metrics(registry)
+    # Report "down" until the first poll succeeds instead of leaving the series absent.
+    metrics.exporter_up.set(0)
+    return metrics
+
+
+def _build_metrics(registry: CollectorRegistry) -> Metrics:
     system_labels = ["system_id", "system_name", "timezone", "status"]
     source_labels = ["system_id", "source_id", "source_name", "serial", "timezone", "sw_version"]
     source_set_labels = source_labels + ["set_name"]
@@ -70,6 +78,12 @@ def build_metrics(registry: CollectorRegistry | None = None) -> Metrics:
         exporter_errors_total=Counter(
             "tigo_exporter_errors_total",
             "Total exporter polling errors",
+            registry=registry,
+        ),
+        exporter_api_errors_total=Counter(
+            "tigo_exporter_api_errors_total",
+            "Tigo API call failures by endpoint, telemetry param and status (HTTP code or error type)",
+            ["endpoint", "param", "status"],
             registry=registry,
         ),
         system_info=Gauge("tigo_system_info", "Static system info metric (value always 1)", system_labels, registry=registry),

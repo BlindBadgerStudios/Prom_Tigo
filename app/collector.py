@@ -18,6 +18,7 @@ _TRANSIENT_ERRORS = (
 )
 
 from .config import AppConfig
+from .errors import retry_after_seconds, status_label
 from .metrics import Metrics, clear_labeled_metrics
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,9 @@ VOLTAGE_PARAMS = {"Vin"}
 CURRENT_PARAMS = {"Iin"}
 SIGNAL_PARAMS = {"RSSI"}
 TEMPERATURE_PARAMS = {"Temp", "Tmod", "Tcell", "Tamb"}
+AGGREGATE_ENDPOINT = "data/aggregate"
+# Upper bound for a single in-poll retry sleep, even if Retry-After asks for longer.
+MAX_RETRY_DELAY_SECONDS = 60.0
 
 
 @dataclass(slots=True)
@@ -131,8 +135,9 @@ class TigoCollector:
     def _safe_get_alerts(self, system_id: int) -> TigoPage:
         try:
             return self.client.get_alerts(system_id, limit=self.config.alert_fetch_limit)
-        except Exception:
+        except Exception as exc:
             logger.warning("Could not fetch alerts for system %s", system_id, exc_info=True)
+            self.metrics.exporter_api_errors_total.labels(endpoint="alerts/system", param="", status=status_label(exc)).inc()
             return TigoPage(items=[])
 
     def _maybe_refresh_topology(self, system_id: int) -> None:
@@ -255,17 +260,6 @@ class TigoCollector:
                 panel_label=panel.panel_label,
             ).set(0)
 
-    def _record_panel_telemetry_defaults(self) -> None:
-        for panel in self._panels_by_object_id.values():
-            labels = panel.labels()
-            self.metrics.panel_power_watts.labels(**labels).set(0)
-            self.metrics.panel_voltage_volts.labels(**labels).set(0)
-            self.metrics.panel_current_amps.labels(**labels).set(0)
-            self.metrics.panel_signal_strength.labels(**labels).set(0)
-            self.metrics.panel_temperature_celsius.labels(**labels).set(0)
-            for param in self.config.panel_telemetry_params:
-                self.metrics.panel_metric_value.labels(**labels, param=param).set(0)
-
     def _record_panel_telemetry(self, system_id: int, summary: Any, system: Any) -> None:
         if not self._panels_by_object_id:
             return
@@ -273,12 +267,14 @@ class TigoCollector:
         if not object_ids:
             return
         self._latest_power_by_object_id.clear()
-        self._record_panel_telemetry_defaults()
+        # No zero pre-fill: a param that fails or has no value for a panel leaves
+        # that series absent for this poll (tigo_panel_up / last_telemetry show staleness).
 
         start, end = self._resolve_panel_window(system_id, object_ids, summary, system)
         start_str = start.strftime('%Y-%m-%dT%H:%M:%S')
         end_str = end.strftime('%Y-%m-%dT%H:%M:%S')
         current_seen: set[int] = set()
+        failed_params: list[str] = []
         for param in self.config.panel_telemetry_params:
             try:
                 table = self._get_aggregate_with_retry(
@@ -290,7 +286,10 @@ class TigoCollector:
                     max_retries=self.config.rate_limit_max_retries,
                     base_delay=self.config.rate_limit_base_delay_seconds,
                 )
-            except Exception:
+            except Exception as exc:
+                status = status_label(exc)
+                self.metrics.exporter_api_errors_total.labels(endpoint=AGGREGATE_ENDPOINT, param=param, status=status).inc()
+                failed_params.append(f"{param} ({status})")
                 logger.debug("Telemetry param %s unavailable for system %s", param, system_id, exc_info=True)
                 continue
 
@@ -320,6 +319,14 @@ class TigoCollector:
                 current_seen.add(object_id)
                 self.metrics.panel_metric_value.labels(**labels, param=param).set(value)
                 self._record_param_specific_metric(param, labels, value, object_id)
+
+        if failed_params:
+            # One WARNING per poll rather than one per param/retry.
+            logger.warning(
+                "Panel telemetry unavailable this poll for system %s: %s (series absent until the next successful fetch)",
+                system_id,
+                ", ".join(failed_params),
+            )
 
         now_ts = datetime.now(tz=UTC).timestamp()
         for object_id, panel in self._panels_by_object_id.items():
@@ -370,6 +377,10 @@ class TigoCollector:
             except requests.exceptions.HTTPError as exc:
                 if exc.response is not None and exc.response.status_code == 429 and attempt < max_retries - 1:
                     delay = base_delay * (2 ** attempt)
+                    retry_after = retry_after_seconds(exc)
+                    if retry_after is not None:
+                        delay = max(delay, retry_after)
+                    delay = min(delay, MAX_RETRY_DELAY_SECONDS)
                     logger.debug("Rate limited on param %s, retrying in %.1fs (attempt %d/%d)", param, delay, attempt + 1, max_retries)
                     time.sleep(delay)
                 else:
