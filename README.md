@@ -20,6 +20,32 @@ Exporter health:
 - `tigo_exporter_last_success_timestamp_seconds`
 - `tigo_exporter_poll_duration_seconds`
 - `tigo_exporter_errors_total`
+- `tigo_exporter_api_errors_total{endpoint,param,status}` - failed Tigo API calls. `endpoint` is
+  `data/aggregate`, `alerts/system` or `poll` (a whole poll failed); `param` is the telemetry
+  param for `data/aggregate`; `status` is the HTTP status code or an error type such as
+  `timeout` or `ConnectionError`.
+
+`tigo_exporter_up` is `0` from startup until the first successful poll.
+
+### Missing values are absent, not 0
+
+A panel series is only exported when the API returned a value for it in the current poll.
+If a param fails (HTTP 400/429/5xx, timeout) or a panel has no sample in the window, that
+series is **absent** for that poll instead of reading `0`. A real `0` from the API (for example
+at night) is still exported as `0`. Failed params are logged once per poll at WARNING and counted
+in `tigo_exporter_api_errors_total`. Use `tigo_panel_up` and
+`tigo_panel_last_telemetry_timestamp_seconds` to detect stale panels, and remember that sums
+such as `tigo_inverter_power_watts` only include panels that reported in that poll.
+
+### Failure handling
+
+- After a failed poll the exporter waits with exponential backoff and jitter (poll interval,
+  then 2x, 4x, ... up to 15 minutes) instead of the fixed interval. On HTTP 429 the
+  `Retry-After` header is a minimum. The normal interval resumes after a successful poll.
+- The exporter logs in again only after HTTP 401/403. Other errors (429, 400, 5xx, timeouts)
+  keep the existing session.
+- Inside a poll, a rate-limited `data/aggregate` call is retried up to `RATE_LIMIT_MAX_RETRIES`
+  times, honoring `Retry-After` (capped at 60 s per retry).
 
 System/source status:
 - `tigo_system_info`
@@ -59,25 +85,28 @@ HTTP 400. Any param that does not map cleanly to a dedicated metric is still exp
 `tigo_panel_metric_value{param=...}`.
 
 Default `PANEL_TELEMETRY_PARAMS` (when the variable is unset):
-- cloud mode: `Pin,Vin,Iin,RSSI,Temp,Tmod,Tcell,Tamb`
+- cloud mode: `Pin,Vin,Iin,RSSI`
 - local mode: `Pin,Vin,Iin,RSSI` (plus `Tmod,Tcell,Tamb` when `TIGO_LOCAL_RAW_TEMP_VARIANTS=true`)
 
-The temperature entries in the cloud default are not supported by the cloud API; see below.
-The shipped `compose.cloud.yaml` already sets `PANEL_TELEMETRY_PARAMS: "Pin,Vin,Iin,RSSI"`.
+In cloud mode the exporter validates `PANEL_TELEMETRY_PARAMS` at startup: any entry outside
+`Pin`, `Vin`, `Iin`, `RSSI`, `Inv_AC`, `Inverter_AC` is logged at WARNING and skipped, so it
+never costs an API call. Local mode is not validated: the local CCA client returns no data for
+params it does not support, so those series are simply absent.
 
 ## Panel temperature
 
-**Known limitation: in cloud mode, `tigo_panel_temperature_celsius` is always `0`.
-That value is a placeholder, not a real reading.**
+**Known limitation: in cloud mode, `tigo_panel_temperature_celsius` is not emitted.**
+Earlier versions exported it as a constant `0` placeholder; dashboards or alerts that read it
+will now see no data in cloud mode.
 
 - Tigo cloud API v3 does not expose panel temperature. `data/aggregate` rejects `Temp`,
   `Tmod`, `Tcell`, `Tamb` and other temperature params with HTTP 400 (`param must be one of
   the following values: ...`), and `objects/system` contains no temperature object
   (verified 2026-10-12 against a live system).
-- The exporter initializes every panel gauge to `0` each poll. A param that fails or returns
-  no value is skipped, so the gauge stays at `0`. `Temp`, `Tmod`, `Tcell`, and `Tamb` all
-  feed the same `tigo_panel_temperature_celsius` gauge, and `tigo_panel_metric_value{param=...}`
-  for those params also reads `0`.
+- Cloud mode skips temperature params (see above), so neither
+  `tigo_panel_temperature_celsius` nor `tigo_panel_metric_value{param="Temp"...}` is exported.
+  `Temp`, `Tmod`, `Tcell`, and `Tamb` all feed the same `tigo_panel_temperature_celsius` gauge
+  when they are polled (local mode).
 - Panel temperature has only been seen with local CCA access. Local support is still
   exploratory: on the CCA tested by PyTigo, `temp=tmod`/`tcell`/`tamb` returned the same
   payload as `pin` (power), and `temp=temp` returned an empty body. With
@@ -85,10 +114,8 @@ That value is a placeholder, not a real reading.**
   so check that they differ from `tigo_panel_power_watts` before you treat them as temperatures.
   Local mode leaves the temperature params out by default.
 
-Recommendation for cloud users: leave `Temp`, `Tmod`, `Tcell`, and `Tamb` out of
-`PANEL_TELEMETRY_PARAMS` (for example `Pin,Vin,Iin,RSSI`), or ignore the temperature gauge.
-This also avoids one rejected API call per temperature param on every poll. A future change
-may report missing values as absent instead of `0`.
+Cloud users who still list `Temp`, `Tmod`, `Tcell`, or `Tamb` in `PANEL_TELEMETRY_PARAMS` will
+see a startup WARNING; remove them to silence it.
 
 ## Environment variables
 
@@ -146,6 +173,11 @@ The container is configured with:
 - tmpfs for `/tmp`
 - dropped Linux capabilities
 - `no-new-privileges`
+
+The image runs as a non-root `app` user, is based on a digest-pinned
+`python:3.12.15-slim-bookworm`, ships only runtime dependencies (`requirements.txt`; test tools
+are in `requirements-dev.txt`), and has a `HEALTHCHECK` that fetches `/metrics` with Python's
+`urllib` (it honors `LISTEN_PORT`).
 
 ## Development
 
