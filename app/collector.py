@@ -239,12 +239,14 @@ class TigoCollector:
             for set_item in getattr(source, 'sets', []):
                 set_labels = dict(labels)
                 set_labels['set_name'] = set_item.set_name
-                if _ts(getattr(set_item, 'last_min', None)) is not None:
-                    self.metrics.source_set_last_min_timestamp_seconds.labels(**set_labels).set(_ts(set_item.last_min))
-                if _ts(getattr(set_item, 'last_day', None)) is not None:
-                    self.metrics.source_set_last_day_timestamp_seconds.labels(**set_labels).set(_ts(set_item.last_day))
-                if _ts(getattr(set_item, 'last_raw', None)) is not None:
-                    self.metrics.source_set_last_raw_timestamp_seconds.labels(**set_labels).set(_ts(set_item.last_raw))
+                for gauge, attr in (
+                    (self.metrics.source_set_last_min_timestamp_seconds, 'last_min'),
+                    (self.metrics.source_set_last_day_timestamp_seconds, 'last_day'),
+                    (self.metrics.source_set_last_raw_timestamp_seconds, 'last_raw'),
+                ):
+                    set_ts = _ts(getattr(set_item, attr, None))
+                    if set_ts is not None:
+                        gauge.labels(**set_labels).set(set_ts)
 
     def _record_panel_topology(self) -> None:
         for panel in self._panels_by_object_id.values():

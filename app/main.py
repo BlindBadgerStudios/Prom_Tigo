@@ -59,11 +59,11 @@ def _failure_delay(
     max_backoff) and the actual delay is drawn from [ceiling/2, ceiling] so several
     exporters do not retry in lockstep. A Retry-After from a 429 is a floor.
     """
-    rng = rng or random
+    uniform = rng.uniform if rng is not None else random.uniform
     base = max(float(poll_interval_seconds), 1.0)
     exponent = min(max(consecutive_failures - 1, 0), 16)
     ceiling = min(base * (2 ** exponent), max(max_backoff, base))
-    delay = rng.uniform(ceiling / 2, ceiling)
+    delay = uniform(ceiling / 2, ceiling)
     if retry_after is not None:
         delay = max(delay, retry_after)
     return delay
