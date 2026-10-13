@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 
@@ -54,11 +55,12 @@ def _run_loop(collector: TigoCollector, poll_interval_seconds: int, metrics) -> 
 
 
 def main() -> None:
-    config = load_config()
+    # Configure logging before load_config() so config validation warnings use the normal format.
     logging.basicConfig(
-        level=config.log_level,
+        level=os.getenv("LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(message)s",
     )
+    config = load_config()
     metrics = build_metrics()
     client = _build_client(config)
     collector = TigoCollector(client=client, config=config, metrics=metrics)
