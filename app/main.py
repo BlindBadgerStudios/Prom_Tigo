@@ -15,6 +15,8 @@ from .config import AppConfig, load_config
 from .errors import http_status, is_auth_error, retry_after_seconds, status_label
 from .metrics import build_metrics
 
+logger = logging.getLogger("app.main")
+
 
 def _build_client(config: AppConfig) -> TigoClientProtocol:
     if config.mode == "local":
@@ -94,16 +96,17 @@ def _run_cycle(
         delay = _failure_delay(
             poll_interval_seconds, state.consecutive_failures, retry_after, rng=rng
         )
-        logging.exception(
+        status = status_label(exc)
+        logger.exception(
             "Polling cycle failed (%s, %d consecutive); next attempt in %.0fs%s",
-            status_label(exc),
+            status,
             state.consecutive_failures,
             delay,
             ", re-login scheduled" if not state.logged_in else "",
         )
         metrics.exporter_errors_total.inc()
         metrics.exporter_api_errors_total.labels(
-            endpoint="poll", param="", status=status_label(exc)
+            endpoint="poll", param="", status=status
         ).inc()
         metrics.exporter_up.set(0)
         return delay
@@ -111,7 +114,7 @@ def _run_cycle(
         state.consecutive_failures = 0
         metrics.exporter_up.set(1)
         metrics.exporter_last_success_timestamp.set(time.time())
-        logging.info("Poll succeeded in %.2fs", time.time() - start)
+        logger.info("Poll succeeded in %.2fs", time.time() - start)
         return float(poll_interval_seconds)
     finally:
         metrics.exporter_poll_duration.set(time.time() - start)
@@ -134,7 +137,7 @@ def main() -> None:
     client = _build_client(config)
     collector = TigoCollector(client=client, config=config, metrics=metrics)
     start_http_server(config.listen_port, registry=metrics.registry)
-    logging.info(
+    logger.info(
         "Starting Tigo exporter on port %d (%s mode)", config.listen_port, config.mode
     )
     thread = threading.Thread(
