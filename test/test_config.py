@@ -4,7 +4,7 @@ from app.main import _build_client
 
 def test_load_config_accepts_local_timezone(monkeypatch):
     monkeypatch.setenv('TIGO_MODE', 'local')
-    monkeypatch.setenv('TIGO_LOCAL_HOST', '192.168.192.114')
+    monkeypatch.setenv('TIGO_LOCAL_HOST', '192.168.1.50')
     monkeypatch.setenv('TIGO_LOCAL_TIMEZONE', 'America/Phoenix')
     monkeypatch.delenv('TIGO_LOCAL_UTC_OFFSET', raising=False)
     monkeypatch.delenv('TIGO_LOCAL_TZ_OFFSET_SECONDS', raising=False)
@@ -18,7 +18,7 @@ def test_load_config_accepts_local_timezone(monkeypatch):
 
 def test_build_client_passes_user_friendly_timezone_options(monkeypatch):
     monkeypatch.setenv('TIGO_MODE', 'local')
-    monkeypatch.setenv('TIGO_LOCAL_HOST', '192.168.192.114')
+    monkeypatch.setenv('TIGO_LOCAL_HOST', '192.168.1.50')
     monkeypatch.setenv('TIGO_LOCAL_TIMEZONE', 'America/Phoenix')
     monkeypatch.setenv('TIGO_LOCAL_UTC_OFFSET', '-07:00')
     monkeypatch.setenv('TIGO_LOCAL_TZ_OFFSET_SECONDS', '-18000')

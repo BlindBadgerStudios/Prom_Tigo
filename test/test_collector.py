@@ -272,9 +272,9 @@ def test_collect_once_exports_zero_system_summary_metrics():
     config = AppConfig(
         mode='local',
         system_id=123,
-        local_host='192.168.192.114',
+        local_host='192.168.1.50',
         local_username='Tigo',
-        local_password='$olar',
+        local_password='test-pass',
         panel_telemetry_params=['Pin', 'Vin', 'Iin', 'RSSI'],
         panel_stale_after_seconds=900,
     )
@@ -298,9 +298,9 @@ def test_collect_once_local_falls_back_to_latest_populated_window():
     config = AppConfig(
         mode='local',
         system_id=123,
-        local_host='192.168.192.114',
+        local_host='192.168.1.50',
         local_username='Tigo',
-        local_password='$olar',
+        local_password='test-pass',
         panel_telemetry_params=['Pin', 'Vin', 'Iin', 'RSSI'],
         panel_stale_after_seconds=900,
     )
@@ -391,9 +391,9 @@ def test_collect_once_local_uses_device_date_and_exports_zero_panel_values():
     config = AppConfig(
         mode='local',
         system_id=123,
-        local_host='192.168.192.114',
+        local_host='192.168.1.50',
         local_username='Tigo',
-        local_password='$olar',
+        local_password='test-pass',
         panel_telemetry_params=['Pin', 'Vin', 'Iin', 'RSSI'],
         panel_stale_after_seconds=900,
     )
@@ -489,9 +489,9 @@ def test_collect_once_local_keeps_all_panels_exported_with_zero_when_offline():
     config = AppConfig(
         mode='local',
         system_id=123,
-        local_host='192.168.192.114',
+        local_host='192.168.1.50',
         local_username='Tigo',
-        local_password='$olar',
+        local_password='test-pass',
         panel_telemetry_params=['Pin', 'Vin', 'Iin', 'RSSI'],
         panel_stale_after_seconds=900,
     )
@@ -614,9 +614,9 @@ def test_collect_once_local_uses_fresher_today_when_summary_jsconfig_date_is_sta
     config = AppConfig(
         mode='local',
         system_id=123,
-        local_host='192.168.192.114',
+        local_host='192.168.1.50',
         local_username='Tigo',
-        local_password='$olar',
+        local_password='test-pass',
         panel_telemetry_params=['Pin', 'Vin', 'Iin', 'RSSI'],
         panel_stale_after_seconds=900,
     )
