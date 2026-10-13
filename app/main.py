@@ -62,7 +62,7 @@ def _failure_delay(
     uniform = rng.uniform if rng is not None else random.uniform
     base = max(float(poll_interval_seconds), 1.0)
     exponent = min(max(consecutive_failures - 1, 0), 16)
-    ceiling = min(base * (2 ** exponent), max(max_backoff, base))
+    ceiling = min(base * (2**exponent), max(max_backoff, base))
     delay = uniform(ceiling / 2, ceiling)
     if retry_after is not None:
         delay = max(delay, retry_after)
@@ -91,7 +91,9 @@ def _run_cycle(
         if is_auth_error(exc):
             state.logged_in = False
         retry_after = retry_after_seconds(exc) if http_status(exc) == 429 else None
-        delay = _failure_delay(poll_interval_seconds, state.consecutive_failures, retry_after, rng=rng)
+        delay = _failure_delay(
+            poll_interval_seconds, state.consecutive_failures, retry_after, rng=rng
+        )
         logging.exception(
             "Polling cycle failed (%s, %d consecutive); next attempt in %.0fs%s",
             status_label(exc),
@@ -100,7 +102,9 @@ def _run_cycle(
             ", re-login scheduled" if not state.logged_in else "",
         )
         metrics.exporter_errors_total.inc()
-        metrics.exporter_api_errors_total.labels(endpoint="poll", param="", status=status_label(exc)).inc()
+        metrics.exporter_api_errors_total.labels(
+            endpoint="poll", param="", status=status_label(exc)
+        ).inc()
         metrics.exporter_up.set(0)
         return delay
     else:
@@ -130,7 +134,9 @@ def main() -> None:
     client = _build_client(config)
     collector = TigoCollector(client=client, config=config, metrics=metrics)
     start_http_server(config.listen_port, registry=metrics.registry)
-    logging.info("Starting Tigo exporter on port %d (%s mode)", config.listen_port, config.mode)
+    logging.info(
+        "Starting Tigo exporter on port %d (%s mode)", config.listen_port, config.mode
+    )
     thread = threading.Thread(
         target=_run_loop,
         args=(collector, config.poll_interval_seconds, metrics),

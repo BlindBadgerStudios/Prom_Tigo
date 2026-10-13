@@ -32,7 +32,9 @@ def is_auth_error(exc: BaseException) -> bool:
     return http_status(exc) in AUTH_STATUS_CODES
 
 
-def retry_after_seconds(exc: BaseException, *, now: datetime | None = None) -> float | None:
+def retry_after_seconds(
+    exc: BaseException, *, now: datetime | None = None
+) -> float | None:
     """Parse Retry-After (delta-seconds or HTTP-date) from a 429/503 HTTPError response."""
     response = getattr(exc, "response", None)
     headers = getattr(response, "headers", None)
