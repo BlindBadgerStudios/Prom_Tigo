@@ -1,0 +1,27 @@
+# Only app/ and requirements.txt are needed in the build context.
+.git
+.gitignore
+.pre-commit-config.yaml
+.venv
+venv
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+test
+*.md
+*.yaml
+*.yml
+requirements-dev.txt
+.env
+*.env
+.env.*
+secrets
+*.pem
+*.key
+dist
+build
+*.egg-info
