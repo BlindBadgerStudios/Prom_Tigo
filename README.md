@@ -113,7 +113,7 @@ Local mode extras:
 - `TIGO_MODE=local`
 - `TIGO_LOCAL_HOST`
 - `TIGO_LOCAL_USERNAME` - default `Tigo`
-- `TIGO_LOCAL_PASSWORD` - default `$olar`
+- `TIGO_LOCAL_PASSWORD` - required in local mode (`<cca-password>`; the app falls back to the CCA vendor default if unset)
 - `TIGO_LOCAL_TIMEZONE` - optional IANA timezone name like `America/Los_Angeles` (recommended)
 - `TIGO_LOCAL_UTC_OFFSET` - optional offset string like `-07:00`
 - `TIGO_LOCAL_TZ_OFFSET_SECONDS` - legacy raw offset fallback; default `0`
@@ -127,7 +127,7 @@ Local mode extras:
   scrape_timeout: 15s
   static_configs:
     - targets:
-        - 192.168.192.52:10111
+        - 192.168.1.10:10111
       labels:
         site: home
         environment: prod
