@@ -10,7 +10,7 @@ them over HTTP for Prometheus.
 Current priorities:
 - system and gateway status/freshness
 - recent alerts visibility
-- panel telemetry such as watts, volts, amps, RSSI, and optionally temperature-like fields
+- panel telemetry such as watts, volts, amps, and RSSI (panel temperature is not available from the cloud API; see [Panel temperature](#panel-temperature))
 - topology labels that make Grafana dashboards and PromQL joins practical
 
 ## Metrics focus
@@ -53,21 +53,42 @@ Panel telemetry:
 
 ## Important note on telemetry params
 
-The documented Tigo aggregate parameters clearly cover `Pin`, `Vin`, `Iin`, and `RSSI`.
-Temperature-related parameters can vary by installation or endpoint behavior, so this exporter
-supports a configurable list of telemetry params and treats temperature aliases as best-effort.
-Any param that does not map cleanly to a dedicated metric is still exported through
+Tigo cloud API v3 `data/aggregate` only accepts these `param` values:
+`Pin`, `Vin`, `Iin`, `RSSI`, `Inv_AC`, `Inverter_AC`. Any other value is rejected with
+HTTP 400. Any param that does not map cleanly to a dedicated metric is still exported through
 `tigo_panel_metric_value{param=...}`.
 
-Default telemetry params:
-- `Pin`
-- `Vin`
-- `Iin`
-- `RSSI`
-- `Temp`
-- `Tmod`
-- `Tcell`
-- `Tamb`
+Default `PANEL_TELEMETRY_PARAMS` (when the variable is unset):
+- cloud mode: `Pin,Vin,Iin,RSSI,Temp,Tmod,Tcell,Tamb`
+- local mode: `Pin,Vin,Iin,RSSI` (plus `Tmod,Tcell,Tamb` when `TIGO_LOCAL_RAW_TEMP_VARIANTS=true`)
+
+The temperature entries in the cloud default are not supported by the cloud API; see below.
+The shipped `compose.cloud.yaml` already sets `PANEL_TELEMETRY_PARAMS: "Pin,Vin,Iin,RSSI"`.
+
+## Panel temperature
+
+**Known limitation: in cloud mode, `tigo_panel_temperature_celsius` is always `0`.
+That value is a placeholder, not a real reading.**
+
+- Tigo cloud API v3 does not expose panel temperature. `data/aggregate` rejects `Temp`,
+  `Tmod`, `Tcell`, `Tamb` and other temperature params with HTTP 400 (`param must be one of
+  the following values: ...`), and `objects/system` contains no temperature object
+  (verified 2026-10-12 against a live system).
+- The exporter initializes every panel gauge to `0` each poll. A param that fails or returns
+  no value is skipped, so the gauge stays at `0`. `Temp`, `Tmod`, `Tcell`, and `Tamb` all
+  feed the same `tigo_panel_temperature_celsius` gauge, and `tigo_panel_metric_value{param=...}`
+  for those params also reads `0`.
+- Panel temperature has only been seen with local CCA access. Local support is still
+  exploratory: on the CCA tested by PyTigo, `temp=tmod`/`tcell`/`tamb` returned the same
+  payload as `pin` (power), and `temp=temp` returned an empty body. With
+  `TIGO_LOCAL_RAW_TEMP_VARIANTS=true` those values feed `tigo_panel_temperature_celsius`,
+  so check that they differ from `tigo_panel_power_watts` before you treat them as temperatures.
+  Local mode leaves the temperature params out by default.
+
+Recommendation for cloud users: leave `Temp`, `Tmod`, `Tcell`, and `Tamb` out of
+`PANEL_TELEMETRY_PARAMS` (for example `Pin,Vin,Iin,RSSI`), or ignore the temperature gauge.
+This also avoids one rejected API call per temperature param on every poll. A future change
+may report missing values as absent instead of `0`.
 
 ## Environment variables
 
@@ -83,7 +104,7 @@ Optional:
 - `TIGO_TIMEOUT_SECONDS` - default `30`
 - `TOPOLOGY_REFRESH_INTERVAL_POLLS` - default `10`
 - `PANEL_TELEMETRY_WINDOW_MINUTES` - default `15`
-- `PANEL_TELEMETRY_PARAMS` - comma-separated telemetry params to request
+- `PANEL_TELEMETRY_PARAMS` - comma-separated telemetry params to request (cloud accepts only `Pin`, `Vin`, `Iin`, `RSSI`, `Inv_AC`, `Inverter_AC`; see [Panel temperature](#panel-temperature))
 - `SOURCE_STALE_AFTER_SECONDS` - default `900`
 - `PANEL_STALE_AFTER_SECONDS` - default `900`
 - `ALERT_FETCH_LIMIT` - default `200`
@@ -96,6 +117,7 @@ Local mode extras:
 - `TIGO_LOCAL_TIMEZONE` - optional IANA timezone name like `America/Los_Angeles` (recommended)
 - `TIGO_LOCAL_UTC_OFFSET` - optional offset string like `-07:00`
 - `TIGO_LOCAL_TZ_OFFSET_SECONDS` - legacy raw offset fallback; default `0`
+- `TIGO_LOCAL_RAW_TEMP_VARIANTS` - default `false`; adds exploratory `Tmod`, `Tcell`, `Tamb` (see [Panel temperature](#panel-temperature))
 
 ## Prometheus scrape config example
 

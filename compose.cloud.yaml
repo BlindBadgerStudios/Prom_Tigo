@@ -15,6 +15,9 @@ services:
       TIGO_TIMEOUT_SECONDS: "30"
       TOPOLOGY_REFRESH_INTERVAL_POLLS: "10"
       PANEL_TELEMETRY_WINDOW_MINUTES: "15"
+      # Cloud API v3 accepts only Pin, Vin, Iin, RSSI, Inv_AC, Inverter_AC.
+      # Temperature params (Temp, Tmod, Tcell, Tamb) are rejected and would leave
+      # tigo_panel_temperature_celsius at a placeholder 0, so leave them out.
       PANEL_TELEMETRY_PARAMS: "Pin,Vin,Iin,RSSI"
       SOURCE_STALE_AFTER_SECONDS: "900"
       PANEL_STALE_AFTER_SECONDS: "900"
