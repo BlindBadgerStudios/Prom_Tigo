@@ -40,6 +40,57 @@ from .status_health import (
 EXPORTER_NAME = "prom_tigo"
 CLOUD_TEMPS_NOTE = "Omitted in cloud mode (not an error)"
 
+# Standing operator catalogue. The live "Hint" row is separate and depends on state.
+_STATUS_HINTS = (
+    "401/403 → check API token/cred mount; do not paste into chat",
+    "timeout → check docker3 outbound / upstream API",
+    "429 → rate limit; backoff is intentional",
+    "TLS/DNS → network path",
+    "zero/absent metrics in daylight with UP → upstream empty, not scrape down",
+    "Tigo temps: omitted in cloud mode (not an error)",
+    "Don't restart-loop",
+)
+
+# Shared page chrome with the other energy exporters: warm page, white cards,
+# a two-column grid, and a colored treatment for UP / DEGRADED / DOWN.
+_STATUS_CSS = """
+    :root { color-scheme: light; }
+    body {
+      margin: 0;
+      font: 15px/1.45 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+      color: #1b1b1b;
+      background: #f6f5f2;
+    }
+    main { max-width: 980px; margin: 0 auto; padding: 1.5rem 1rem 3rem; }
+    h1 { font-size: 1.45rem; margin: 0 0 0.25rem; }
+    h2 { font-size: 1rem; margin: 0 0 0.5rem; }
+    a { color: #143d66; }
+    .banner {
+      background: #eef3f8;
+      border: 1px solid #c5d4e4;
+      padding: 0.75rem 1rem;
+      margin: 1rem 0;
+    }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    section { background: #fff; border: 1px solid #ddd; padding: 0.75rem 1rem; }
+    .hints { margin-top: 1rem; }
+    dl { margin: 0; }
+    dt { color: #555; font-size: 0.85rem; }
+    dd { margin: 0 0 0.65rem; }
+    dd:last-child { margin-bottom: 0; }
+    .UP, .DEGRADED, .DOWN {
+      display: inline-block;
+      padding: 0.15rem 0.45rem;
+      font-weight: 700;
+    }
+    .UP { color: #0a7a32; background: #e7f6ea; }
+    .DEGRADED { color: #8a5a00; background: #fff3d6; }
+    .DOWN { color: #a32020; background: #fde8e8; }
+    .rule { color: #444; font-size: 0.9rem; }
+    ul { margin: 0.3rem 0 0; padding-left: 1.2rem; }
+    @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+"""
+
 SeriesCounter = Callable[[], int]
 UpReader = Callable[[], float | None]
 
@@ -288,75 +339,127 @@ def _extras_payload(
 
 
 def render_status_html(payload: dict[str, Any]) -> str:
-    """Read-only operator page. Every dynamic value is escaped."""
+    """Read-only operator page. Every dynamic value is escaped.
+
+    Section cards match the shared energy-exporter layout. Field text is the
+    same Tigo status payload; only the presentation changes.
+    """
     overall = str(payload.get("overall") or "DOWN")
     extras = payload.get("extras") or {}
-    rows = [
-        ("Overall", str(payload.get("overall_phrase") or overall)),
-        ("Exporter", _exporter_line(payload)),
-        ("Mode", str(payload.get("mode_detail") or "")),
-        (
-            "Last success",
-            _joined_time(
-                payload.get("last_success_at_pt"), payload.get("last_success_relative")
+    phrase = str(payload.get("overall_phrase") or overall)
+    overview = _dl(
+        [
+            ("Overall", _state_html(overall, phrase)),
+            ("Exporter", escape(_exporter_line(payload))),
+            ("Mode", escape(str(payload.get("mode_detail") or ""))),
+            (
+                "Last success",
+                escape(
+                    _joined_time(
+                        payload.get("last_success_at_pt"),
+                        payload.get("last_success_relative"),
+                    )
+                ),
             ),
-        ),
-        ("Poll", _poll_line(payload)),
-        ("Upstream", _result_line(payload.get("upstream"))),
-        ("Failures", _failures_line(payload.get("failures"))),
-        ("Backoff", _backoff_line(payload.get("backoff_s"))),
-        ("Next retry", _retry_line(payload)),
-        ("Last error", _result_line(payload.get("last_error")) or "None"),
-        ("Hint", str(payload.get("hint") or "")),
-        ("exporter_up", str(payload.get("exporter_up"))),
-        ("Series", _series_line(payload)),
-        ("Uptime", format_in_uptime(payload.get("uptime_s"))),
-        ("Process", str(payload.get("process") or "")),
-        ("Site", _site_line(extras)),
-        ("Panels", str(extras.get("panels_note") or "")),
-        ("Temps", _temps_line(extras)),
-    ]
-    body_rows = "\n".join(
-        f"      <dt>{escape(label)}</dt><dd>{escape(value)}</dd>"
-        for label, value in rows
+            ("Poll", escape(_poll_line(payload))),
+            ("Upstream", escape(_result_line(payload.get("upstream")))),
+            ("Failures", escape(_failures_line(payload.get("failures")))),
+            ("Backoff", escape(_backoff_line(payload.get("backoff_s")))),
+            ("Next retry", escape(_retry_line(payload))),
+        ]
     )
-    title = escape(f"{payload.get('exporter')} status")
+    error = _dl(
+        [
+            (
+                "Last error",
+                escape(_result_line(payload.get("last_error")) or "None"),
+            ),
+            ("Hint", escape(str(payload.get("hint") or ""))),
+        ]
+    )
+    series = _dl(
+        [
+            ("exporter_up", escape(str(payload.get("exporter_up")))),
+            ("Series", escape(_series_line(payload))),
+            ("Uptime", escape(format_in_uptime(payload.get("uptime_s")))),
+            ("Process", escape(str(payload.get("process") or ""))),
+        ]
+    )
+    extra_rows = _dl(
+        [
+            ("Site", escape(_site_line(extras))),
+            ("Panels", escape(str(extras.get("panels_note") or ""))),
+            ("Temps", escape(_temps_line(extras))),
+        ]
+    )
+    hints = "\n".join(f"      <li>{escape(item)}</li>" for item in _STATUS_HINTS)
+    title = escape(f"{payload.get('exporter') or 'exporter'} · /status")
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
   <title>{title}</title>
-  <style>
-    body {{ font: 16px/1.45 sans-serif; margin: 2rem; color: #1c1c1c; background: #fff; }}
-    h1 {{ font-size: 1.35rem; margin-bottom: 0.25rem; }}
-    .note {{ max-width: 46rem; }}
-    .banner {{ display: inline-block; padding: 0.4rem 0.7rem; font-weight: 700; }}
-    .UP {{ background: #e7f6ea; }}
-    .DEGRADED {{ background: #fff3d6; }}
-    .DOWN {{ background: #fde8e8; }}
-    dl {{ display: grid; grid-template-columns: 11rem 1fr; gap: 0.35rem 1rem; max-width: 52rem; }}
-    dt {{ color: #444; }}
-    dd {{ margin: 0; }}
-    footer {{ margin-top: 2rem; max-width: 46rem; color: #333; }}
-    a {{ color: #143d66; }}
-  </style>
+  <style>{_STATUS_CSS}</style>
 </head>
 <body>
-  <p class="note">{escape(str(payload.get("access_note") or ""))}</p>
-  <h1>{escape(str(payload.get("exporter") or "exporter"))} /status</h1>
-  <p class="banner {escape(overall)}">{escape(str(payload.get("overall_phrase") or overall))}</p>
-  <dl>
-{body_rows}
-  </dl>
+<main>
+  <h1>{title}</h1>
+  <p class="banner">{escape(str(payload.get("access_note") or ""))}</p>
+  <p class="rule">{escape(STATE_RULE_SUMMARY)}</p>
   <p><a href="?format=json">JSON</a></p>
-  <footer>
-    <p>{escape(STATE_RULE_SUMMARY)}</p>
-    <p>Read-only. This page does not change the exporter or the upstream API.</p>
-  </footer>
+  <div class="grid">
+    <section>
+      <h2>Overview</h2>
+      <dl>
+{overview}
+      </dl>
+    </section>
+    <section>
+      <h2>Error and hint</h2>
+      <dl>
+{error}
+      </dl>
+    </section>
+    <section>
+      <h2>Series and process</h2>
+      <dl>
+{series}
+      </dl>
+    </section>
+    <section>
+      <h2>Exporter extras</h2>
+      <dl>
+{extra_rows}
+      </dl>
+    </section>
+  </div>
+  <section class="hints">
+    <h2>Hints</h2>
+    <ul>
+{hints}
+    </ul>
+  </section>
+  <p class="rule">
+    Read-only. This page does not change the exporter or the upstream API.
+  </p>
+</main>
 </body>
 </html>
 """
+
+
+def _dl(rows: list[tuple[str, str]]) -> str:
+    """Render label/value rows. ``value`` is already escaped HTML."""
+    return "\n".join(
+        f"        <dt>{escape(label)}</dt><dd>{value}</dd>" for label, value in rows
+    )
+
+
+def _state_html(overall: str, phrase: str) -> str:
+    css = overall if overall in {"UP", "DEGRADED", "DOWN"} else "DOWN"
+    return f'<span class="{css}">{escape(phrase)}</span>'
 
 
 def format_in_uptime(seconds: Any) -> str:

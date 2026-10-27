@@ -231,7 +231,20 @@ def test_up_json_and_html_share_fields():
     assert payload["next_poll_at_pt"] in html
     assert "51 present / 51 expected" in html
     assert "Omitted in cloud mode (not an error)" in html
-    assert "prom_tigo 0.5.1 (abc1234)" in html
+    assert f"prom_tigo {__version__} (abc1234)" in html
+    assert "<title>prom_tigo · /status</title>" in html
+    assert "<h1>prom_tigo · /status</h1>" in html
+    for heading in (
+        "Overview",
+        "Error and hint",
+        "Series and process",
+        "Exporter extras",
+        "Hints",
+    ):
+        assert f"<h2>{heading}</h2>" in html
+    assert 'class="grid"' in html
+    assert 'class="UP"' in html
+    assert ">Notes<" not in html
     assert "<Orchard & array>" not in html
     assert "&lt;Orchard &amp; array&gt;" in html
     assert "<form" not in html.lower()
