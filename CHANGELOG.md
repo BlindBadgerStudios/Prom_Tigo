@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.2 - 2026-10-27
+
+### Changed
+- `/status` HTML uses the shared sectioned card layout (Overview, Error and hint, Series and process, Exporter extras, Hints) and the same page chrome as the other energy exporters: title `prom_tigo · /status`, warm page background, white cards, and a colored treatment for UP / DEGRADED / DOWN. Tigo extras and hints are unchanged. `GET /status?format=json` fields are unchanged.
+
 ## 0.5.1 - 2026-10-27
 
 ### Added
