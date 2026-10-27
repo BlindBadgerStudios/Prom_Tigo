@@ -952,3 +952,40 @@ def test_collect_once_local_uses_fresher_today_when_summary_jsconfig_date_is_sta
         )
         == 150.0
     )
+
+
+def test_status_snapshot_keeps_site_name_and_panel_counts_only():
+    metrics = build_metrics()
+    client = FakeClient()
+    original = client.get_system
+
+    def get_system(system_id):
+        system = original(system_id)
+        system.latitude = 45.5123
+        system.longitude = -122.6789
+        system.street = "1 Secret Road"
+        system.email = "owner@example.com"
+        return system
+
+    client.get_system = get_system
+    config = AppConfig(
+        username="user",
+        password="pass",
+        system_id=123,
+        panel_telemetry_params=["Pin", "Vin", "Iin", "RSSI"],
+        panel_stale_after_seconds=900,
+    )
+    collector = TigoCollector(client=client, config=config, metrics=metrics)
+    collector.collect_once()
+
+    extras = collector.status_extras
+    assert extras is not None
+    assert extras.site_name == "Array One"
+    assert extras.panels_present == 2
+    assert extras.panels_expected == 2
+    blob = repr(extras)
+    assert "45.5123" not in blob
+    assert "-122.6789" not in blob
+    assert "Secret Road" not in blob
+    assert "owner@example.com" not in blob
+    assert "pass" not in blob

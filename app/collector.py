@@ -33,6 +33,26 @@ AGGREGATE_ENDPOINT = "data/aggregate"
 MAX_RETRY_DELAY_SECONDS = 60.0
 
 
+@dataclass(frozen=True, slots=True)
+class CollectorStatusSnapshot:
+    """Last successful poll facts safe to show on /status.
+
+    Site name only. Coordinates, street address, and account email are never copied.
+    """
+
+    site_name: str | None
+    panels_present: int
+    panels_expected: int
+
+
+def _public_site_name(system: Any) -> str | None:
+    name = getattr(system, "name", None)
+    if name is None:
+        return None
+    text = str(name).strip()
+    return text[:200] or None
+
+
 @dataclass(slots=True)
 class PanelRecord:
     system_id: int
@@ -100,6 +120,9 @@ class TigoCollector:
         self._panel_last_seen_hint_by_object_id: dict[int, datetime] = {}
         self._local_summary_override_active = False
         self._last_local_device_date: date | None = None
+        self._panels_present = 0
+        self._reported_source_panels = 0
+        self.status_extras: CollectorStatusSnapshot | None = None
 
     def login(self) -> None:
         auth = self.client.login()
@@ -131,6 +154,7 @@ class TigoCollector:
         self._record_panel_telemetry(system_id, summary, system)
         self._record_local_summary_overrides(system)
         self._record_inverter_and_string_rollups()
+        self._remember_status_extras(system)
 
     def _safe_get_alerts(self, system_id: int) -> TigoPage:
         try:
@@ -248,6 +272,7 @@ class TigoCollector:
 
     def _record_source_metrics(self, system_id: int, sources: list[Any]) -> None:
         now_ts = datetime.now(tz=UTC).timestamp()
+        reported_panels = 0
         for source in sources:
             labels = {
                 "system_id": str(system_id),
@@ -268,6 +293,7 @@ class TigoCollector:
                     float(source.gateway_count)
                 )
             if source.panel_count is not None:
+                reported_panels += int(source.panel_count)
                 self.metrics.source_panel_count.labels(**simple).set(
                     float(source.panel_count)
                 )
@@ -296,6 +322,17 @@ class TigoCollector:
                     set_ts = _ts(getattr(set_item, attr, None))
                     if set_ts is not None:
                         gauge.labels(**set_labels).set(set_ts)
+        self._reported_source_panels = reported_panels
+
+    def _remember_status_extras(self, system: Any) -> None:
+        expected = len(self._panels_by_object_id)
+        if expected == 0:
+            expected = self._reported_source_panels
+        self.status_extras = CollectorStatusSnapshot(
+            site_name=_public_site_name(system),
+            panels_present=self._panels_present,
+            panels_expected=expected,
+        )
 
     def _record_panel_topology(self) -> None:
         for panel in self._panels_by_object_id.values():
@@ -317,9 +354,11 @@ class TigoCollector:
         self, system_id: int, summary: Any, system: Any
     ) -> None:
         if not self._panels_by_object_id:
+            self._panels_present = 0
             return
         object_ids = sorted(self._panels_by_object_id.keys())
         if not object_ids:
+            self._panels_present = 0
             return
         self._latest_power_by_object_id.clear()
         # No zero pre-fill: a param that fails or has no value for a panel leaves
@@ -391,6 +430,7 @@ class TigoCollector:
             )
 
         now_ts = datetime.now(tz=UTC).timestamp()
+        present = 0
         for object_id, panel in self._panels_by_object_id.items():
             hint_dt = self._panel_last_seen_hint_by_object_id.get(object_id)
             last_seen_dt = self._last_panel_telemetry_by_object_id.get(object_id)
@@ -413,11 +453,14 @@ class TigoCollector:
                     and now_ts - sample_ts <= self.config.panel_stale_after_seconds
                     else 0
                 )
+            if is_up:
+                present += 1
             self.metrics.panel_up.labels(
                 system_id=str(system_id),
                 panel_id=str(panel.panel_id),
                 panel_label=panel.panel_label,
             ).set(is_up)
+        self._panels_present = present
 
     def _get_aggregate_with_retry(
         self,
