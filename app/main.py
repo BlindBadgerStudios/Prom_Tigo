@@ -7,13 +7,19 @@ import threading
 import time
 from dataclasses import dataclass
 
-from prometheus_client import start_http_server
 from pytigo import TigoCCAClient, TigoClient, TigoClientProtocol
 
+from . import __version__
 from .collector import TigoCollector
 from .config import AppConfig, load_config
 from .errors import http_status, is_auth_error, retry_after_seconds, status_label
 from .metrics import build_metrics
+from .status_page import (
+    ExporterStatus,
+    count_series,
+    describe_exception,
+    start_exporter_http_server,
+)
 
 logger = logging.getLogger("app.main")
 
@@ -71,6 +77,15 @@ def _failure_delay(
     return delay
 
 
+def _optional_build_sha() -> str | None:
+    """Git SHA when the image already stamps one. Absent otherwise."""
+    for name in ("GIT_SHA", "SOURCE_COMMIT", "TIGO_BUILD_SHA"):
+        value = os.getenv(name, "").strip()
+        if value:
+            return value[:64]
+    return None
+
+
 def _run_cycle(
     collector: TigoCollector,
     poll_interval_seconds: int,
@@ -78,6 +93,7 @@ def _run_cycle(
     state: LoopState,
     *,
     rng: random.Random | None = None,
+    status_page: ExporterStatus | None = None,
 ) -> float:
     """Run one poll and return how long to sleep before the next one."""
     start = time.time()
@@ -109,21 +125,47 @@ def _run_cycle(
             endpoint="poll", param="", status=status
         ).inc()
         metrics.exporter_up.set(0)
+        if status_page is not None:
+            code, message = describe_exception(exc)
+            status_page.record_failure(
+                code=code,
+                message=message,
+                consecutive_failures=state.consecutive_failures,
+                delay=delay,
+            )
         return delay
     else:
         state.consecutive_failures = 0
         metrics.exporter_up.set(1)
         metrics.exporter_last_success_timestamp.set(time.time())
         logger.info("Poll succeeded in %.2fs", time.time() - start)
+        if status_page is not None:
+            status_page.record_success(
+                delay=float(poll_interval_seconds),
+                extras=getattr(collector, "status_extras", None),
+            )
         return float(poll_interval_seconds)
     finally:
         metrics.exporter_poll_duration.set(time.time() - start)
 
 
-def _run_loop(collector: TigoCollector, poll_interval_seconds: int, metrics) -> None:
+def _run_loop(
+    collector: TigoCollector,
+    poll_interval_seconds: int,
+    metrics,
+    status_page: ExporterStatus,
+) -> None:
     state = LoopState()
     while True:
-        time.sleep(_run_cycle(collector, poll_interval_seconds, metrics, state))
+        time.sleep(
+            _run_cycle(
+                collector,
+                poll_interval_seconds,
+                metrics,
+                state,
+                status_page=status_page,
+            )
+        )
 
 
 def main() -> None:
@@ -136,16 +178,29 @@ def main() -> None:
     metrics = build_metrics()
     client = _build_client(config)
     collector = TigoCollector(client=client, config=config, metrics=metrics)
-    start_http_server(config.listen_port, registry=metrics.registry)
-    logger.info(
-        "Starting Tigo exporter on port %d (%s mode)", config.listen_port, config.mode
+    status_page = ExporterStatus(
+        mode=config.mode,
+        poll_interval_seconds=config.poll_interval_seconds,
+        listen_port=config.listen_port,
+        exporter_up=lambda: metrics.registry.get_sample_value("tigo_exporter_up"),
+        series_count=lambda: count_series(metrics.registry),
+        version=__version__,
+        build=_optional_build_sha(),
     )
     thread = threading.Thread(
         target=_run_loop,
-        args=(collector, config.poll_interval_seconds, metrics),
+        args=(collector, config.poll_interval_seconds, metrics, status_page),
         daemon=True,
     )
+    status_page.attach_poll_thread(thread)
     thread.start()
+    start_exporter_http_server(config.listen_port, metrics.registry, status_page)
+    logger.info(
+        "Starting Tigo exporter on port %d (%s mode); status http://127.0.0.1:%d/status",
+        config.listen_port,
+        config.mode,
+        config.listen_port,
+    )
     while True:
         time.sleep(3600)
 
